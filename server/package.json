@@ -1,0 +1,28 @@
+{
+  "name": "wallet-pulse-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@metaplex-foundation/js": "^0.20.1",
+    "@solana/spl-token-registry": "^0.2.4574",
+    "@solana/web3.js": "^1.95.3",
+    "axios": "^1.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "fs": "^0.0.1-security",
+    "https": "^1.0.0",
+    "ioredis": "^5.7.0",
+    "pg": "^8.16.3",
+    "sqlite3": "^5.1.7",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
