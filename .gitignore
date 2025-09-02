@@ -1,0 +1,134 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs
+logs/
+*.log
+*.out
+*.pid
+*.seed
+*.pid.lock
+
+# dotenv environment variables
+.env
+.env.*
+
+# Database
+*.sqlite
+*.sqlite3
+db.sqlite*
+*.db
+*.db-journal
+# *.sql
+*.psql
+*.dump
+
+# OS
+.DS_Store
+Thumbs.db
+Icon?
+
+# IDEs
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+*.sw?
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Build
+build/
+dist/
+.cache/
+.next/
+out/
+
+# Test
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+/jest.config.js
+/jest.config.ts
+/coverage/
+
+# Images/Media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.svg
+*.webp
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.ogg
+
+# Misc
+*.tgz
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*.swp
+*.swo
+*.swn
+
+# Local config
+*.local.js
+*.local.json
+*.local.env
+
+# Mac
+.AppleDouble
+.LSOverride
+
+# Windows
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# Project-specific
+backend/.env
+frontend/.env
+backend/env.local
+frontend/env.local
+backend/.env.*
+frontend/.env.*
+
+# Ignore test artifacts
+backend/test_admin.js
+
+# Ignore database dumps/backups
+backend/*.dump
+backend/*.backup
+backend/*.sql
+
+# Ignore sensitive files
+secrets.*
+private.*
+
+# Ignore package lock files at root (optional, if you use only one lock file)
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
