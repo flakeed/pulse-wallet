@@ -75,7 +75,7 @@ class WalletMonitoringService {
                                 signature,
                                 walletAddress,
                                 walletName: wallet.name,
-                                groupId: wallet.group_id,
+                                groupId: wallet.group_id, 
                                 groupName: wallet.group_name,
                                 transactionType: txData.type,
                                 solAmount: txData.solAmount,
@@ -99,9 +99,17 @@ class WalletMonitoringService {
             const successfulTxs = batchResults.filter((tx) => tx !== null);
             if (successfulTxs.length > 0) {
                 const pipeline = redis.pipeline();
+                
                 successfulTxs.forEach((tx) => {
                     pipeline.publish('transactions', JSON.stringify(tx));
+                    
+                    if (tx.groupId) {
+                        pipeline.publish(`transactions:group:${tx.groupId}`, JSON.stringify(tx));
+                    }
+                    
+                    console.log(`[${new Date().toISOString()}] 📤 Publishing transaction ${tx.signature} to channels: transactions${tx.groupId ? `, transactions:group:${tx.groupId}` : ''}`);
                 });
+                
                 await pipeline.exec();
             }
         }

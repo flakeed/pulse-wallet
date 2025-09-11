@@ -132,25 +132,25 @@ class SolanaWebSocketService {
             console.warn(`[${new Date().toISOString()}] ⚠️ Invalid logs notification params`);
             return;
         }
+        
         const { result, subscription } = params;
         const walletAddress = this.findWalletBySubscription(subscription);
+        
         if (!walletAddress) {
             console.warn(`[${new Date().toISOString()}] ⚠️ No wallet found for subscription ${subscription}`);
             return;
         }
     
         if (result.value && result.value.signature) {
-            console.log(`[${new Date().toISOString()}] 🔍 New global transaction detected: ${result.value.signature}`);
+            console.log(`[${new Date().toISOString()}] 🔍 New transaction detected: ${result.value.signature} for wallet ${walletAddress.slice(0,8)}...`);
+            
             const wallet = await this.db.getWalletByAddress(walletAddress);
             if (!wallet) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in global database`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in database`);
                 return;
             }
             
-            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-                console.log(`[${new Date().toISOString()}] ℹ️ Skipping transaction for wallet ${walletAddress} (not in active group ${this.activeGroupId})`);
-                return;
-            }
+            console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0,8)}... (group: ${wallet.group_id || 'none'})`);
             
             await this.monitoringService.processWebhookMessage({
                 signature: result.value.signature,
@@ -301,10 +301,14 @@ class SolanaWebSocketService {
 
     async subscribeToWallets() {
         this.subscriptions.clear();
+        
         const wallets = await this.db.getActiveWallets(this.activeGroupId);
         
+        console.log(`[${new Date().toISOString()}] 📊 Found ${wallets.length} wallets to monitor${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
+        
         if (wallets.length === 0) {
-            return;
+            console.log(`[${new Date().toISOString()}] ℹ️ No wallets found for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ''}`);
+            return { successful: 0, failed: 0, errors: [] };
         }
         
         if (wallets.length > this.maxSubscriptions) {
@@ -312,23 +316,23 @@ class SolanaWebSocketService {
             wallets.length = this.maxSubscriptions;
         }
         
-        
         if (wallets.length > 0) {
-            console.log(`[${new Date().toISOString()}] 🔍 Sample global wallets to subscribe:`);
-            wallets.slice(0, 3).forEach(wallet => {
-                console.log(`  - ${wallet.address.slice(0, 8)}... (group: ${wallet.group_id})`);
+            console.log(`[${new Date().toISOString()}] 🔍 Sample wallets to subscribe (group: ${this.activeGroupId || 'all'}):`);
+            wallets.slice(0, 5).forEach(wallet => {
+                console.log(`  - ${wallet.address.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
             });
         }
-
+    
         const walletAddresses = wallets.map(w => w.address);
         const results = await this.subscribeToWalletsBatch(walletAddresses, 1000);
-
-        console.log(`[${new Date().toISOString()}] 🎉 Global subscription summary:`);
+    
+        console.log(`[${new Date().toISOString()}] 🎉 Subscription summary for group ${this.activeGroupId || 'all'}:`);
         console.log(`  - Total wallets: ${wallets.length}`);
         console.log(`  - Successful subscriptions: ${results.successful}`);
         console.log(`  - Failed subscriptions: ${results.failed}`);
         console.log(`  - Active subscriptions: ${this.subscriptions.size}`);
-
+        console.log(`  - Active group ID: ${this.activeGroupId || 'none'}`);
+    
         return results;
     }
 
