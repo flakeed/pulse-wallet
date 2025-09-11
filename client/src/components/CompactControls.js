@@ -1,4 +1,5 @@
 import React from 'react';
+import SoundToggle from './SoundToggle';
 
 function CompactControls({ 
   groups, 
@@ -27,7 +28,6 @@ function CompactControls({
               </option>
             ))}
           </select>
-          
           {selectedGroupInfo && (
             <div className="text-blue-400 text-xs bg-blue-900/30 px-2 py-1 rounded">
               {selectedGroupInfo.groupName}: {selectedGroupInfo.walletCount.toLocaleString()} wallets
@@ -36,6 +36,10 @@ function CompactControls({
         </div>
 
         <div className="flex items-center space-x-3">
+          <SoundToggle />
+          
+          <div className="h-4 w-px bg-gray-600"></div>
+          
           <select
             value={timeframe}
             onChange={(e) => onTimeframeChange(e.target.value)}
