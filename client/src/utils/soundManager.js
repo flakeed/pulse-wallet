@@ -5,7 +5,7 @@ class SoundManager {
       this.soundBuffer = null;
       this.isInitialized = false;
       
-      this.notificationSoundUrl = './client/public/Voicy_Notifications.mp3';
+      this.notificationSoundUrl = '/Voicy_Notifications.mp3';
     }
   
     async initialize() {
