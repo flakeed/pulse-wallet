@@ -321,7 +321,7 @@ class SolanaWebSocketService {
         }
 
         const walletAddresses = wallets.map(w => w.address);
-        const results = await this.subscribeToWalletsBatch(walletAddresses, 150);
+        const results = await this.subscribeToWalletsBatch(walletAddresses, 1000);
 
         console.log(`[${new Date().toISOString()}] 🎉 Global subscription summary:`);
         console.log(`  - Total wallets: ${wallets.length}`);
