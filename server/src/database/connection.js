@@ -174,7 +174,7 @@ class Database {
                 const params = [];
                 
                 if (groupId) {
-                    walletQuery += ` AND w.group_id = $1`;
+                    walletQuery += ` AND w.group_id = $1::uuid`;
                     params.push(groupId);
                 }
                 
@@ -370,20 +370,25 @@ class Database {
         try {
             console.log(`[${new Date().toISOString()}] 🚀 Transactions fetch: ${hours}h, limit ${limit}${groupId ? `, group ${groupId}` : ''}`);
             const startTime = Date.now();
-
-            let typeFilter = '';
+    
+            let whereConditions = [`t.block_time >= NOW() - INTERVAL '${hours} hours'`];
             let queryParams = [limit];
             let paramIndex = 2;
             
             if (transactionType) {
-                typeFilter = `AND t.transaction_type = ${paramIndex++}`;
+                whereConditions.push(`t.transaction_type = $${paramIndex}`);
                 queryParams.push(transactionType);
+                paramIndex++;
             }
+            
             if (groupId) {
-                typeFilter += ` AND w.group_id = ${paramIndex++}`;
+                whereConditions.push(`w.group_id = $${paramIndex}::uuid`);
                 queryParams.push(groupId);
+                paramIndex++;
             }
-
+    
+            const whereClause = whereConditions.join(' AND ');
+    
             const optimizedQuery = `
                 SELECT 
                     t.signature,
@@ -423,20 +428,22 @@ class Database {
                 LEFT JOIN groups g ON w.group_id = g.id
                 LEFT JOIN token_operations to_ ON t.id = to_.transaction_id
                 LEFT JOIN tokens tk ON to_.token_id = tk.id
-                WHERE t.block_time >= NOW() - INTERVAL '${hours} hours'
-                ${typeFilter}
+                WHERE ${whereClause}
                 GROUP BY t.id, t.signature, t.block_time, t.transaction_type, 
                          t.sol_spent, t.sol_received, w.address, w.name, 
                          w.group_id, g.name
                 ORDER BY t.block_time DESC
                 LIMIT $1
             `;
-
+    
+            console.log(`[${new Date().toISOString()}] 🔍 Query params:`, queryParams);
+            console.log(`[${new Date().toISOString()}] 🔍 Where clause:`, whereClause);
+    
             const result = await this.pool.query(optimizedQuery, queryParams);
             const duration = Date.now() - startTime;
-
+    
             console.log(`[${new Date().toISOString()}] ⚡ Global transactions fetch completed in ${duration}ms: ${result.rows.length} transactions`);
-
+    
             return result.rows.map(row => {
                 const tokens = Array.isArray(row.tokens) ? row.tokens.filter(t => t !== null) : [];
                 
@@ -480,7 +487,7 @@ class Database {
                     }))
                 };
             });
-
+    
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in global transactions fetch:`, error);
             throw error;
