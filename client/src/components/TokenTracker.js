@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import TokenCard from './TokenCard';
 import CompactControls from './CompactControls';
+import soundManager from '../utils/soundManager';
 
 function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, groups, selectedGroup, onGroupChange, walletCount, selectedGroupInfo }) {
   const [items, setItems] = useState([]);
@@ -8,6 +9,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState('latest');
+  const previousTokenMints = useRef(new Set());
 
   const aggregateTokens = (transactions, hours, groupId) => {
     const EXCLUDED_TOKENS = [
@@ -147,6 +149,21 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     try {
       const aggregatedTokens = aggregateTokens(transactions, hours, groupId);
       const sortedTokens = sortTokens(aggregatedTokens, sortBy);
+      
+      const currentTokenMints = new Set(sortedTokens.map(token => token.mint));
+      const newTokens = sortedTokens.filter(token => !previousTokenMints.current.has(token.mint));
+      
+      if (newTokens.length > 0 && previousTokenMints.current.size > 0) {
+        console.log(`🔊 New tokens detected: ${newTokens.length}`);
+        newTokens.forEach(token => {
+          console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...)`);
+        });
+        
+        soundManager.playNewTokenSound();
+      }
+      
+      previousTokenMints.current = currentTokenMints;
+      
       setItems(sortedTokens);
       setError(null);
     } catch (e) {
