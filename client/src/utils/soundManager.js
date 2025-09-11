@@ -5,12 +5,7 @@ class SoundManager {
       this.soundBuffer = null;
       this.isInitialized = false;
       
-      this.notification = {
-        frequency1: 800,  
-        frequency2: 1200, 
-        duration: 0.3,
-        fadeOut: 0.1
-      };
+      this.notificationSoundUrl = './client/public/Voicy_Notifications.mp3';
     }
   
     async initialize() {
@@ -19,7 +14,7 @@ class SoundManager {
       try {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
-        await this.generateNotificationSound();
+        await this.loadNotificationSound();
         
         this.isInitialized = true;
         console.log('🔊 Sound manager initialized');
@@ -28,45 +23,19 @@ class SoundManager {
       }
     }
   
-    async generateNotificationSound() {
+    async loadNotificationSound() {
       if (!this.audioContext) return;
   
-      const sampleRate = this.audioContext.sampleRate;
-      const duration = this.notification.duration;
-      const fadeOutDuration = this.notification.fadeOut;
-      const length = sampleRate * duration;
-      
-      const buffer = this.audioContext.createBuffer(1, length, sampleRate);
-      const data = buffer.getChannelData(0);
-  
-      for (let i = 0; i < length; i++) {
-        const time = i / sampleRate;
-        const fadeOutTime = duration - fadeOutDuration;
+      try {
+        const response = await fetch(this.notificationSoundUrl);
+        if (!response.ok) throw new Error('Failed to fetch MP3 file');
         
-        let sample = 0;
-        
-        const freq1 = this.notification.frequency1 * (1 + Math.sin(time * 15) * 0.1);
-        sample += Math.sin(2 * Math.PI * freq1 * time) * 0.4;
-        
-        const freq2 = this.notification.frequency2 * (1 + Math.sin(time * 8) * 0.05);
-        sample += Math.sin(2 * Math.PI * freq2 * time) * 0.2;
-        
-        if (sample > 0.3) sample = 0.3 + (sample - 0.3) * 0.5;
-        if (sample < -0.3) sample = -0.3 + (sample + 0.3) * 0.5;
-        
-        let envelope = 1;
-        if (time > fadeOutTime) {
-          envelope = 1 - (time - fadeOutTime) / fadeOutDuration;
-        }
-        
-        if (time < 0.02) {
-          envelope *= time / 0.02;
-        }
-        
-        data[i] = sample * envelope * 0.3; 
+        const arrayBuffer = await response.arrayBuffer();
+        this.soundBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
+        console.log('🔊 Notification sound loaded');
+      } catch (error) {
+        console.error('❌ Failed to load MP3 sound:', error);
       }
-  
-      this.soundBuffer = buffer;
     }
   
     async playNewTokenSound() {
@@ -86,7 +55,7 @@ class SoundManager {
         source.connect(gainNode);
         gainNode.connect(this.audioContext.destination);
         
-        gainNode.gain.value = 0.2;
+        gainNode.gain.value = 0.2; 
         
         source.start();
         
@@ -117,8 +86,8 @@ class SoundManager {
       }
       await this.playNewTokenSound();
     }
-  }
-  
-  const soundManager = new SoundManager();
-  
-  export default soundManager;
+}
+
+const soundManager = new SoundManager();
+
+export default soundManager;
