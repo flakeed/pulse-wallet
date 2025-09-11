@@ -30,8 +30,8 @@ const priceService = new PriceService();
 const sseClients = new Set();
 
 const sslOptions = {
-  key: fs.readFileSync('/etc/letsencrypt/live/wallet-monitor.ddns.net/privkey.pem'),
-  cert: fs.readFileSync('/etc/letsencrypt/live/wallet-monitor.ddns.net/fullchain.pem'),
+  key: fs.readFileSync('/etc/letsencrypt/live/degenlogs.com/privkey.pem'),
+  cert: fs.readFileSync('/etc/letsencrypt/live/degenlogs.com/fullchain.pem'),
 };
 
 app.use(express.json({ 
@@ -49,10 +49,10 @@ app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://localhost:3001',
-    'https://wallet-monitor.ddns.net',
-    'http://wallet-monitor.ddns.net',
-    'https://wallet-monitor.ddns.net:3000',
-    'http://wallet-monitor.ddns.net:3000'  
+    'https://degenlogs.com',
+    'http://degenlogs.com',
+    'https://degenlogs.com:3000',
+    'http://degenlogs.com:3000',
   ],
   optionsSuccessStatus: 200,
 }));

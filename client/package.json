@@ -15,7 +15,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build"
   },
-  "proxy": "https://wallet-monitor.ddns.net/api",
+  "proxy": "https://degenlogs.com/api",
   "browserslist": {
     "production": [
       ">0.2%",
