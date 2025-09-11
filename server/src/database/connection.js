@@ -259,7 +259,7 @@ class Database {
         const params = [];
         
         if (groupId) {
-            query += ` AND w.group_id = $1`;
+            query += ` AND w.group_id = $1::uuid`;
             params.push(groupId);
         }
         
@@ -507,7 +507,7 @@ class Database {
             const params = [];
             
             if (groupId) {
-                query += ` AND w.group_id = $1`;
+                query += ` AND w.group_id = $1::uuid`;
                 params.push(groupId);
             }
             
