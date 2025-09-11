@@ -95,8 +95,8 @@ function WalletManager({ onAddWalletsBulk, onCreateGroup, onRemoveAllWallets, gr
       totalWallets: wallets.length,
       validWallets: wallets.length,
       errors: errors.length,
-      canImport: wallets.length > 0 && wallets.length <= 100000,
-      tooMany: wallets.length > 100000,
+      canImport: wallets.length > 0 && wallets.length <= 1000000,
+      tooMany: wallets.length > 1000000,
       errorMessages: errors.slice(0, 10)
     });
   }, [parseBulkInput]);
@@ -140,8 +140,8 @@ function WalletManager({ onAddWalletsBulk, onCreateGroup, onRemoveAllWallets, gr
       return;
     }
 
-    if (wallets.length > 100000) {
-      setBulkResults({ type: 'error', message: 'Maximum 100,000 wallets allowed per bulk import.' });
+    if (wallets.length > 1000000) {
+      setBulkResults({ type: 'error', message: 'Maximum 1,000,000 wallets allowed per bulk import.' });
       return;
     }
 
@@ -435,7 +435,7 @@ function WalletManager({ onAddWalletsBulk, onCreateGroup, onRemoveAllWallets, gr
                 
                 {bulkValidation.tooMany && (
                   <div className="text-red-400 text-sm">
-                    Too many wallets! Maximum 100,000 allowed.
+                    Too many wallets! Maximum 1,000,000 allowed.
                   </div>
                 )}
 
