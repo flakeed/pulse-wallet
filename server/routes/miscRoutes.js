@@ -1,4 +1,4 @@
-module.exports = (auth, db, priceService) => {
+module.exports = (auth, db, priceService, solanaWebSocketService) => {
   const express = require('express');
   const router = express.Router();
 
@@ -72,7 +72,7 @@ module.exports = (auth, db, priceService) => {
         console.log(`[${new Date().toISOString()}] ℹ️ Removed ${validMints.length - uniqueMints.length} duplicate mints`);
       }
 
-      const startTime = Date.now;
+      const startTime = Date.now();
 
       const result = {};
       const processedCount = { successful: 0, failed: 0, cached: 0 };

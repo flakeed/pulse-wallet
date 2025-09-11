@@ -124,7 +124,7 @@ app.use('/api/auth', authRoutes(auth, db));
 app.use('/api/admin', adminRoutes(auth, db));
 app.use('/api/wallets', walletRoutes(auth, db, solanaWebSocketService));
 app.use('/api/transactions', transactionRoutes(auth, db, redis, sseClients));
-app.use('/api', miscRoutes(auth, db, priceService));
+app.use('/api', miscRoutes(auth, db, priceService, solanaWebSocketService));
 app.use('/api/groups', groupRoutes(auth, db, solanaWebSocketService));
 
 app.use(errorHandler);
