@@ -8,7 +8,7 @@ import TokenTracker from './components/TokenTracker';
 import TelegramLogin from './components/TelegramLogin';
 import AdminPanel from './components/AdminPanel';
 
-const API_BASE = process.env.REACT_APP_API_BASE || 'https://degenlogs.com/api';
+const API_BASE = process.env.REACT_APP_API_BASE || 'https://degenlogs.com:5001/api';
 const TELEGRAM_BOT_USERNAME = process.env.REACT_APP_TELEGRAM_BOT_USERNAME || 'test_walletpulse_bot';
 
 function App() {
@@ -297,7 +297,7 @@ function App() {
               tokensBought: newTransaction.transactionType === 'buy' ? newTransaction.tokens : [],
               tokensSold: newTransaction.transactionType === 'sell' ? newTransaction.tokens : [],
             };
-            return [formattedTransaction, ...prev].slice(0, 400);
+            return [formattedTransaction, ...prev].slice(0, 4000);
           });
         }
       } catch (err) {

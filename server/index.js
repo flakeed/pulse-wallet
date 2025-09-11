@@ -73,7 +73,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     
     const [walletCounts, transactions, monitoringStatus, groups] = await Promise.all([
       db.getWalletCount(groupId),
-      db.getRecentTransactionsOptimized(hours, 400, transactionType, groupId),
+      db.getRecentTransactionsOptimized(hours, 4000, transactionType, groupId),
       db.getMonitoringStatus(groupId),
       db.getGroups()
     ]);

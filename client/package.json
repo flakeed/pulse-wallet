@@ -15,7 +15,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build"
   },
-  "proxy": "https://degenlogs.com/api",
+  "proxy": "https://degenlogs.com:5001/api",
   "browserslist": {
     "production": [
       ">0.2%",
