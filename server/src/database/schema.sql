@@ -1,10 +1,10 @@
-SET work_mem = '256MB';
+SET work_mem = '32MB';
 SET maintenance_work_mem = '1GB';
-SET shared_buffers = '512MB';
+SET shared_buffers = '2816MB'; 
 SET autocommit = off;
 
 CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     telegram_id BIGINT UNIQUE NOT NULL,
     username VARCHAR(255),
     first_name VARCHAR(255),
@@ -13,69 +13,77 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP
+    last_login TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     session_token VARCHAR(255) UNIQUE NOT NULL,
     expires_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS whitelist (
-    telegram_id BIGINT PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
     added_by UUID REFERENCES users(id) ON DELETE SET NULL,
     notes TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (telegram_id)
 );
 
 CREATE TABLE IF NOT EXISTS groups (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     name VARCHAR(255) UNIQUE NOT NULL,
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS wallets (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     address VARCHAR(44) UNIQUE NOT NULL,
     name VARCHAR(255),
     group_id UUID REFERENCES groups(id) ON DELETE SET NULL,
     added_by UUID REFERENCES users(id) ON DELETE SET NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     mint VARCHAR(44) UNIQUE NOT NULL,
     symbol VARCHAR(50),
     name VARCHAR(255),
     decimals INTEGER,
     deployment_time TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     wallet_id UUID REFERENCES wallets(id) ON DELETE CASCADE, 
-    signature VARCHAR(88) UNIQUE NOT NULL,
+    signature VARCHAR(88) NOT NULL,
     block_time TIMESTAMP NOT NULL,
     transaction_type VARCHAR(20) NOT NULL,
     sol_spent NUMERIC DEFAULT 0 NOT NULL,
     sol_received NUMERIC DEFAULT 0 NOT NULL,
     usd_spent NUMERIC DEFAULT 0 NOT NULL,
     usd_received NUMERIC DEFAULT 0 NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, block_time),
+    UNIQUE (signature, block_time)
+) PARTITION BY RANGE (block_time);
 
 CREATE TABLE IF NOT EXISTS token_operations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    transaction_id UUID REFERENCES transactions(id) ON DELETE CASCADE, 
+    id UUID NOT NULL,
+    transaction_id UUID NOT NULL,
     token_id UUID REFERENCES tokens(id) ON DELETE CASCADE,
     amount NUMERIC NOT NULL,
     operation_type VARCHAR(20) NOT NULL,
@@ -85,8 +93,11 @@ CREATE TABLE IF NOT EXISTS token_operations (
     usd_value NUMERIC,
     market_cap NUMERIC,
     deployment_time TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    block_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, block_time),
+    FOREIGN KEY (transaction_id, block_time) REFERENCES transactions(id, block_time) ON DELETE CASCADE
+) PARTITION BY RANGE (block_time);
 
 CREATE TABLE IF NOT EXISTS wallet_stats (
     wallet_id UUID PRIMARY KEY REFERENCES wallets(id) ON DELETE CASCADE, 
@@ -102,12 +113,13 @@ CREATE TABLE IF NOT EXISTS wallet_stats (
 );
 
 CREATE TABLE IF NOT EXISTS monitoring_stats (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL,
     processed_signatures INTEGER,
     total_wallets_monitored INTEGER,
     last_scan_duration INTEGER,
     errors_count INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_wallets_address ON wallets(address);
@@ -143,3 +155,5 @@ ON CONFLICT (telegram_id) DO UPDATE SET
 INSERT INTO whitelist (telegram_id, notes)
 VALUES (789676557, 'Initial admin user')
 ON CONFLICT (telegram_id) DO NOTHING;
+
+COMMIT;
