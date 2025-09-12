@@ -15,6 +15,17 @@ class WalletMonitoringService {
         this.isMonitoring = false;
         this.processedSignatures = new Set();
         this.recentlyProcessed = new Set();
+        
+        // Configurable SOL thresholds from environment variables
+        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
+        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
+        this.FEE_THRESHOLD = parseFloat(process.env.SOL_FEE_THRESHOLD) || 0.01;
+        
+        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds configured:`);
+        console.log(`  - Buy threshold: ${this.BUY_THRESHOLD} SOL`);
+        console.log(`  - Sell threshold: ${this.SELL_THRESHOLD} SOL`);
+        console.log(`  - Fee threshold: ${this.FEE_THRESHOLD} SOL`);
+        
         this.stats = {
             totalScans: 0,
             totalWallets: 0,
@@ -261,7 +272,6 @@ class WalletMonitoringService {
 
             const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
             let transactionType, totalSolAmount = 0, usdcAmount = 0;
-            const FEE_THRESHOLD = 0.01;
             let tokenChanges = [];
 
             const solPrice = await this.fetchSolPrice();
@@ -278,27 +288,36 @@ class WalletMonitoringService {
                 usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
             }
 
+            console.log(`[${new Date().toISOString()}] 💰 Transaction analysis for ${sig.signature}:`);
+            console.log(`  - SOL change: ${solChange.toFixed(6)} SOL`);
+            console.log(`  - USDC change: ${usdcChange.toFixed(6)} USDC`);
+            console.log(`  - Using thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}, fee>${this.FEE_THRESHOLD}`);
+
             if (usdcChange !== 0) {
                 usdcAmount = Math.abs(usdcChange);
                 const usdcSolEquivalent = usdcAmount / solPrice;
                 if (usdcChange < 0) {
                     transactionType = 'buy';
                     totalSolAmount = usdcSolEquivalent;
+                    console.log(`[${new Date().toISOString()}] 🛒 USDC buy detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
                 } else if (usdcChange > 0) {
                     transactionType = 'sell';
                     totalSolAmount = usdcSolEquivalent;
+                    console.log(`[${new Date().toISOString()}] 💰 USDC sell detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
                 }
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
-            } else if (solChange < -FEE_THRESHOLD) {
+            } else if (solChange < -this.BUY_THRESHOLD) {
                 transactionType = 'buy';
                 totalSolAmount = Math.abs(solChange);
+                console.log(`[${new Date().toISOString()}] 🛒 SOL buy detected: ${Math.abs(solChange).toFixed(6)} SOL (threshold: ${this.BUY_THRESHOLD})`);
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
-            } else if (solChange > 0.001) {
+            } else if (solChange > this.SELL_THRESHOLD) {
                 transactionType = 'sell';
                 totalSolAmount = solChange;
+                console.log(`[${new Date().toISOString()}] 💰 SOL sell detected: ${solChange.toFixed(6)} SOL (threshold: ${this.SELL_THRESHOLD})`);
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
             } else {
-                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - SOL change too small: ${solChange.toFixed(6)} (likely just fees)`);
+                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - SOL change too small: ${solChange.toFixed(6)} (buy threshold: ${this.BUY_THRESHOLD}, sell threshold: ${this.SELL_THRESHOLD})`);
                 return null;
             }
 
@@ -372,6 +391,8 @@ class WalletMonitoringService {
                     this.saveTokenOperationInTransaction(client, transaction.id, tokenChange, transactionType)
                 );
                 await Promise.all(tokenSavePromises);
+
+                console.log(`[${new Date().toISOString()}] ✅ Successfully saved transaction ${sig.signature} as ${transactionType} with ${totalSolAmount.toFixed(6)} SOL`);
 
                 return {
                     signature: sig.signature,
@@ -485,7 +506,6 @@ class WalletMonitoringService {
                 symbol: tokenInfo.symbol,
                 name: tokenInfo.name,
             });
-
         }
 
         return tokenChanges;
