@@ -601,7 +601,7 @@ class WalletMonitoringService {
             let paramIndex = 1;
             
             if (groupId) {
-                query += ` AND w.group_id = ${paramIndex}`;
+                query += ` AND w.group_id = $${paramIndex}::uuid`;
                 params.push(groupId);
             }
             
