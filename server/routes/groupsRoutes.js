@@ -1,7 +1,7 @@
 module.exports = (auth, db, solanaGrpcService) => {
   const express = require('express');
   const router = express.Router();
-  const { redis } = require('../services/tokenService'); 
+  const { redis } = require('../src/services/tokenService'); 
 
   router.get('/', auth.authRequired, async (req, res) => {
     try {
