@@ -1,4 +1,4 @@
-const { Client, SubscribeRequest } = require("@triton-one/yellowstone-grpc");
+const { Client, SubscribeRequest, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions } = require("@triton-one/yellowstone-grpc");
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 
@@ -30,11 +30,9 @@ class SolanaGrpcService {
             console.log(`[${new Date().toISOString()}] 🔄 gRPC service already started${groupId ? ` for group ${groupId}` : ''}`);
             return;
         }
-        
         console.log(`[${new Date().toISOString()}] 🚀 Starting gRPC Solana client for ${this.grpcEndpoint}${groupId ? `, group ${groupId}` : ''}`);
         this.isStarted = true;
         this.activeGroupId = groupId;
-        
         try {
             await this.connect();
             await this.loadMonitoredWallets();
@@ -49,20 +47,42 @@ class SolanaGrpcService {
     async connect() {
         try {
             console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcEndpoint}`);
-            
-            this.client = new Client(this.grpcEndpoint, undefined, {
-                'grpc.keepalive_time_ms': 30000,
-                'grpc.keepalive_timeout_ms': 5000,
-                'grpc.keepalive_permit_without_calls': true,
-                'grpc.http2.max_pings_without_data': 0,
-                'grpc.http2.min_time_between_pings_ms': 10000,
-                'grpc.http2.min_ping_interval_without_data_ms': 30000
-            });
-
+            try {
+                this.client = new Client(this.grpcEndpoint, undefined, {
+                    'grpc.keepalive_time_ms': 30000,
+                    'grpc.keepalive_timeout_ms': 5000,
+                    'grpc.keepalive_permit_without_calls': true,
+                    'grpc.http2.max_pings_without_data': 0,
+                    'grpc.http2.min_time_between_pings_ms': 10000,
+                    'grpc.http2.min_ping_interval_without_data_ms': 30000
+                });
+            } catch (clientError) {
+                console.log(`[${new Date().toISOString()}] ⚠️ Direct Client creation failed, trying alternative method...`);
+                const grpc = require("@triton-one/yellowstone-grpc");
+                if (grpc.default && grpc.default.Client) {
+                    this.client = new grpc.default.Client(this.grpcEndpoint);
+                } else if (grpc.createClient) {
+                    this.client = grpc.createClient(this.grpcEndpoint);
+                } else {
+                    console.log(`[${new Date().toISOString()}] 📦 Available exports:`, Object.keys(grpc));
+                    throw new Error(`Cannot create gRPC client. Available exports: ${Object.keys(grpc).join(', ')}`);
+                }
+            }
             console.log(`[${new Date().toISOString()}] ✅ Connected to gRPC Solana stream`);
             this.reconnectAttempts = 0;
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC client:`, error.message);
+            try {
+                const grpc = require("@triton-one/yellowstone-grpc");
+                console.log(`[${new Date().toISOString()}] 🔍 gRPC module structure:`, {
+                    hasClient: !!grpc.Client,
+                    hasDefault: !!grpc.default,
+                    exports: Object.keys(grpc),
+                    defaultExports: grpc.default ? Object.keys(grpc.default) : 'no default'
+                });
+            } catch (diagError) {
+                console.error(`[${new Date().toISOString()}] ❌ Cannot diagnose gRPC module:`, diagError.message);
+            }
             throw error;
         }
     }
@@ -71,13 +91,10 @@ class SolanaGrpcService {
         try {
             const wallets = await this.db.getActiveWallets(this.activeGroupId);
             this.monitoredWallets.clear();
-            
             wallets.forEach(wallet => {
                 this.monitoredWallets.add(wallet.address);
             });
-            
             console.log(`[${new Date().toISOString()}] 📊 Loaded ${this.monitoredWallets.size} wallets for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
-            
             if (this.monitoredWallets.size > 0) {
                 console.log(`[${new Date().toISOString()}] 🔍 Sample monitored wallets (group: ${this.activeGroupId || 'all'}):`);
                 Array.from(this.monitoredWallets).slice(0, 5).forEach(address => {
@@ -93,35 +110,60 @@ class SolanaGrpcService {
     async subscribeToTransactions() {
         try {
             console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
-
-            const request = SubscribeRequest.fromJSON({
-                accounts: {},
-                slots: {},
-                transactions: {
-                    "solana_transactions": {
-                        accountInclude: [],
-                        accountExclude: [],
-                        accountRequired: []
-                    }
-                },
-                blocks: {},
-                blocksMeta: {},
-                accountsDataSlice: [],
-                commitment: 1,
-                entry: {}
-            });
-
+            let request;
+            try {
+                request = SubscribeRequest.fromJSON({
+                    accounts: {},
+                    slots: {},
+                    transactions: {
+                        "solana_transactions": {
+                            accountInclude: [],
+                            accountExclude: [],
+                            accountRequired: []
+                        }
+                    },
+                    blocks: {},
+                    blocksMeta: {},
+                    accountsDataSlice: [],
+                    commitment: 1,
+                    entry: {}
+                });
+            } catch (requestError) {
+                console.log(`[${new Date().toISOString()}] ⚠️ SubscribeRequest.fromJSON failed, trying alternative...`);
+                const grpc = require("@triton-one/yellowstone-grpc");
+                if (grpc.SubscribeRequest) {
+                    request = new grpc.SubscribeRequest({
+                        transactions: {
+                            "solana_transactions": {
+                                accountInclude: [],
+                                accountExclude: [],
+                                accountRequired: []
+                            }
+                        },
+                        commitment: 1
+                    });
+                } else {
+                    request = {
+                        transactions: {
+                            "solana_transactions": {
+                                accountInclude: [],
+                                accountExclude: [],
+                                accountRequired: []
+                            }
+                        },
+                        commitment: 1
+                    };
+                }
+            }
             this.stream = await this.client.subscribe();
-            
             await this.stream.write(request, { waitForReady: true });
             console.log(`[${new Date().toISOString()}] ✅ gRPC subscription request sent`);
-
             for await (const data of this.stream) {
                 await this.handleGrpcMessage(data);
             }
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ gRPC subscription error:`, error.message);
-            
+            console.error(`[${new Date().toISOString()}] 🔍 Error details:`, error);
             if (this.isStarted) {
                 await this.handleReconnect();
             }
@@ -131,7 +173,6 @@ class SolanaGrpcService {
     async handleGrpcMessage(data) {
         try {
             this.messageCount++;
-            
             if (data.transaction) {
                 this.stats.totalTransactions++;
                 await this.processTransaction(data.transaction);
@@ -146,55 +187,41 @@ class SolanaGrpcService {
         try {
             const transaction = transactionData.transaction;
             const meta = transactionData.meta;
-            
             if (!transaction || !meta || meta.err) {
                 return;
             }
-
             const signature = transaction.signatures?.[0];
             if (!signature) {
                 return;
             }
-
             const accountKeys = this.extractAccountKeys(transaction);
-            
             const relevantWallets = accountKeys.filter(account => 
                 this.monitoredWallets.has(account)
             );
-
             if (relevantWallets.length === 0) {
                 return;
             }
-
             this.stats.filteredTransactions++;
-
             const blockTime = this.extractBlockTime(transactionData);
-            
             console.log(`[${new Date().toISOString()}] 🎯 Relevant transaction found: ${signature.slice(0, 8)}... for ${relevantWallets.length} wallet(s)`);
-
             for (const walletAddress of relevantWallets) {
                 const wallet = await this.db.getWalletByAddress(walletAddress);
                 if (!wallet) {
                     console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in database`);
                     continue;
                 }
-
                 if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
                     continue;
                 }
-
                 console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0,8)}... (group: ${wallet.group_id || 'none'})`);
-                
                 await this.monitoringService.processWebhookMessage({
                     signature: signature,
                     walletAddress: walletAddress,
                     blockTime: blockTime,
                     groupId: wallet.group_id
                 });
-
                 this.stats.processedTransactions++;
             }
-
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error processing transaction:`, error.message);
             this.stats.errors++;
@@ -203,7 +230,6 @@ class SolanaGrpcService {
 
     extractAccountKeys(transaction) {
         const accountKeys = [];
-        
         try {
             if (transaction.message?.accountKeys) {
                 transaction.message.accountKeys.forEach(key => {
@@ -214,7 +240,6 @@ class SolanaGrpcService {
                     }
                 });
             }
-
             if (transaction.message?.addressTableLookups) {
                 transaction.message.addressTableLookups.forEach(lookup => {
                     if (lookup.writableIndexes) {
@@ -233,7 +258,6 @@ class SolanaGrpcService {
                     }
                 });
             }
-
             if (transaction.message?.instructions) {
                 transaction.message.instructions.forEach(instruction => {
                     if (instruction.accounts) {
@@ -253,7 +277,6 @@ class SolanaGrpcService {
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error extracting account keys:`, error.message);
         }
-
         return [...new Set(accountKeys)];
     }
 
@@ -262,15 +285,12 @@ class SolanaGrpcService {
             if (transactionData.meta?.blockTime) {
                 return transactionData.meta.blockTime;
             }
-            
             if (transactionData.blockTime) {
                 return transactionData.blockTime;
             }
-
             if (transactionData.transaction?.blockTime) {
                 return transactionData.transaction.blockTime;
             }
-
             return Math.floor(Date.now() / 1000);
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error extracting block time:`, error.message);
@@ -300,21 +320,17 @@ class SolanaGrpcService {
 
     async subscribeToWalletsBatch(walletAddresses, batchSize = 1000) {
         if (!walletAddresses || walletAddresses.length === 0) return { successful: 0, failed: 0 };
-        
         const startTime = Date.now();
         let successful = 0;
-
         try {
             walletAddresses.forEach(address => {
                 this.monitoredWallets.add(address);
                 successful++;
             });
-
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ gRPC batch subscription completed in ${duration}ms:`);
             console.log(`  - Added: ${successful} wallets`);
             console.log(`  - Total monitored: ${this.monitoredWallets.size}`);
-
             return { successful, failed: 0, errors: [] };
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC batch subscription:`, error.message);
@@ -324,20 +340,16 @@ class SolanaGrpcService {
 
     async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 1000) {
         if (!walletAddresses || walletAddresses.length === 0) return { successful: 0, failed: 0 };
-        
         const startTime = Date.now();
         let successful = 0;
-
         try {
             walletAddresses.forEach(address => {
                 this.monitoredWallets.delete(address);
                 successful++;
             });
-
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ gRPC batch unsubscription completed in ${duration}ms: ${successful} wallets removed`);
             console.log(`[${new Date().toISOString()}] 📊 Remaining monitored wallets: ${this.monitoredWallets.size}`);
-
             return { successful, failed: 0, errors: [] };
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC batch unsubscription:`, error.message);
@@ -349,33 +361,25 @@ class SolanaGrpcService {
         try {
             const startTime = Date.now();
             console.log(`[${new Date().toISOString()}] 🗑️ Starting complete wallet removal from gRPC service${groupId ? ` for group ${groupId}` : ''}`);
-            
             const walletsToRemove = await this.db.getActiveWallets(groupId);
             const addressesToRemove = walletsToRemove.map(w => w.address);
-            
             console.log(`[${new Date().toISOString()}] 📊 gRPC service found ${walletsToRemove.length} wallets to remove`);
-            
             addressesToRemove.forEach(address => {
                 this.monitoredWallets.delete(address);
             });
-            
             console.log(`[${new Date().toISOString()}] 🧹 Removed ${addressesToRemove.length} wallets from gRPC monitoring`);
-            
             console.log(`[${new Date().toISOString()}] 🗄️ Starting database removal...`);
             await this.monitoringService.removeAllWallets(groupId);
             console.log(`[${new Date().toISOString()}] ✅ Database removal completed`);
-            
             const shouldReload = this.isStarted && (
                 (groupId && groupId === this.activeGroupId) ||
                 (!groupId)
             );
-            
             if (shouldReload) {
                 console.log(`[${new Date().toISOString()}] 🔄 Reloading monitored wallets after group deletion...`);
                 await this.loadMonitoredWallets();
                 console.log(`[${new Date().toISOString()}] ✅ Reload completed: ${this.monitoredWallets.size} wallets now monitored`);
             }
-            
             const duration = Date.now() - startTime;
             const finalReport = {
                 walletsRemoved: walletsToRemove.length,
@@ -385,15 +389,12 @@ class SolanaGrpcService {
                 reloaded: shouldReload,
                 processingTime: `${duration}ms`
             };
-            
             console.log(`[${new Date().toISOString()}] 🎉 Complete gRPC wallet removal finished in ${duration}ms:`, finalReport);
-            
             return {
                 success: true,
                 message: `gRPC service: removed ${walletsToRemove.length} wallets, ${this.monitoredWallets.size} wallets remaining`,
                 details: finalReport
             };
-            
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC removeAllWallets:`, error.message);
             throw error;
@@ -404,13 +405,10 @@ class SolanaGrpcService {
         try {
             const startTime = Date.now();
             console.log(`[${new Date().toISOString()}] 🔄 Switching to group ${groupId || 'all'} in gRPC service`);
-
             this.activeGroupId = groupId;
             await this.loadMonitoredWallets();
-
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
-
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
             throw error;
@@ -423,12 +421,9 @@ class SolanaGrpcService {
             this.isStarted = false;
             return;
         }
-
         this.reconnectAttempts++;
         console.log(`[${new Date().toISOString()}] 🔄 Reconnecting gRPC service (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
         await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
-        
         try {
             await this.stop();
             await this.connect();
@@ -442,7 +437,6 @@ class SolanaGrpcService {
     getStatus() {
         const uptime = Date.now() - this.stats.startTime;
         const transactionsPerSecond = this.stats.totalTransactions / (uptime / 1000);
-        
         return {
             isConnected: this.client !== null && this.stream !== null,
             isStarted: this.isStarted,
@@ -464,15 +458,12 @@ class SolanaGrpcService {
 
     async stop() {
         console.log(`[${new Date().toISOString()}] ⏹️ Stopping gRPC service...`);
-        
         this.isStarted = false;
-        
         try {
             if (this.stream) {
                 await this.stream.end();
                 this.stream = null;
             }
-            
             if (this.client) {
                 this.client.close();
                 this.client = null;
@@ -480,7 +471,6 @@ class SolanaGrpcService {
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error stopping gRPC service:`, error.message);
         }
-        
         console.log(`[${new Date().toISOString()}] ✅ gRPC service stopped`);
     }
 
