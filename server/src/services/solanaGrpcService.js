@@ -109,9 +109,13 @@ class SolanaGrpcService {
                 commitment: CommitmentLevel.CONFIRMED,
                 entry: {}
             });
+            
             this.stream = await this.client.subscribe();
-            await this.stream.write(request, { waitForReady: true });
+            
+            await this.stream.write(request);
+            
             console.log(`[${new Date().toISOString()}] ✅ gRPC subscription request sent`);
+            
             for await (const data of this.stream) {
                 await this.handleGrpcMessage(data);
             }
@@ -419,7 +423,7 @@ class SolanaGrpcService {
                 this.stream = null;
             }
             if (this.client) {
-                this.client.close();
+                await this.client.close();
                 this.client = null;
             }
         } catch (error) {
