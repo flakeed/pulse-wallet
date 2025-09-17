@@ -1,18 +1,18 @@
 module.exports = {
-  startWebSocketService: (solanaWebSocketService) => async () => {
+  startGrpcService: (solanaGrpcService) => async () => {
     let retries = 0;
     const maxRetries = 5;
     const retryDelay = 5000;
 
     while (retries < maxRetries) {
       try {
-        await solanaWebSocketService.start();
-        console.log(`[${new Date().toISOString()}] 🚀 Solana WebSocket service started successfully`);
+        await solanaGrpcService.start();
+        console.log(`[${new Date().toISOString()}] 🚀 Solana gRPC service started successfully`);
         return;
       } catch (error) {
         retries++;
         console.error(
-          `[${new Date().toISOString()}] ❌ Failed to start WebSocket service (attempt ${retries}/${maxRetries}):`,
+          `[${new Date().toISOString()}] ❌ Failed to start gRPC service (attempt ${retries}/${maxRetries}):`,
           error.message
         );
         if (retries < maxRetries) {
@@ -21,6 +21,6 @@ module.exports = {
         }
       }
     }
-    console.error(`[${new Date().toISOString()}] 🛑 Max retries reached. Global WebSocket service failed to start.`);
+    console.error(`[${new Date().toISOString()}] 🛑 Max retries reached. Global gRPC service failed to start.`);
   }
 };
