@@ -16,12 +16,11 @@ class WalletMonitoringService {
         this.processedSignatures = new Set();
         this.recentlyProcessed = new Set();
         
-        // Configurable SOL thresholds from environment variables
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.FEE_THRESHOLD = parseFloat(process.env.SOL_FEE_THRESHOLD) || 0.01;
         
-        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds configured:`);
+        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds configured for gRPC mode:`);
         console.log(`  - Buy threshold: ${this.BUY_THRESHOLD} SOL`);
         console.log(`  - Sell threshold: ${this.SELL_THRESHOLD} SOL`);
         console.log(`  - Fee threshold: ${this.FEE_THRESHOLD} SOL`);
@@ -36,7 +35,7 @@ class WalletMonitoringService {
             startTime: Date.now(),
         };
         this.isProcessingQueue = false;
-        this.queueKey = 'webhook:queue';
+        this.queueKey = 'grpc:queue';
         this.batchSize = 400;
         this.solPriceCache = {
             price: 150,
@@ -47,7 +46,7 @@ class WalletMonitoringService {
 
     stopMonitoring() {
         this.isMonitoring = false;
-        console.log('⏹️ Legacy monitoring stopped');
+        console.log('⏹️ Legacy monitoring stopped (gRPC mode)');
     }
 
     async processQueue() {
@@ -62,7 +61,7 @@ class WalletMonitoringService {
                 try {
                     return JSON.parse(data);
                 } catch (error) {
-                    console.error(`[${new Date().toISOString()}] ❌ Invalid queue entry:`, error.message);
+                    console.error(`[${new Date().toISOString()}] ❌ Invalid gRPC queue entry:`, error.message);
                     return null;
                 }
             }).filter((req) => req !== null);
@@ -71,17 +70,17 @@ class WalletMonitoringService {
     
             const batchResults = await Promise.all(
                 requests.map(async (request) => {
-                    const { signature, walletAddress, blockTime } = request;
+                    const { signature, walletAddress, blockTime, groupId } = request;
                     try {
                         const wallet = await this.db.getWalletByAddress(walletAddress);
                         if (!wallet) {
-                            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found`);
+                            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in gRPC processing`);
                             return null;
                         }
     
                         const txData = await this.processTransaction({ signature, blockTime }, wallet);
                         if (txData) {
-                            console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature}`);
+                            console.log(`[${new Date().toISOString()}] ✅ Processed gRPC transaction ${signature}`);
                             return {
                                 signature,
                                 walletAddress,
@@ -101,7 +100,7 @@ class WalletMonitoringService {
                         }
                         return null;
                     } catch (error) {
-                        console.error(`[${new Date().toISOString()}] ❌ Error processing signature ${signature}:`, error.message);
+                        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC signature ${signature}:`, error.message);
                         return null;
                     }
                 })
@@ -118,7 +117,7 @@ class WalletMonitoringService {
                         pipeline.publish(`transactions:group:${tx.groupId}`, JSON.stringify(tx));
                     }
                     
-                    console.log(`[${new Date().toISOString()}] 📤 Publishing transaction ${tx.signature} to channels: transactions${tx.groupId ? `, transactions:group:${tx.groupId}` : ''}`);
+                    console.log(`[${new Date().toISOString()}] 📤 Publishing gRPC transaction ${tx.signature} to channels: transactions${tx.groupId ? `, transactions:group:${tx.groupId}` : ''}`);
                 });
                 
                 await pipeline.exec();
@@ -133,14 +132,17 @@ class WalletMonitoringService {
     }
 
     async processWebhookMessage(message) {
-        const { signature, walletAddress, blockTime } = message;
+        const { signature, walletAddress, blockTime, groupId } = message;
         const requestId = require('uuid').v4();
+        
         await redis.lpush(this.queueKey, JSON.stringify({
             requestId,
             signature,
             walletAddress,
             blockTime,
+            groupId,
             timestamp: Date.now(),
+            source: 'grpc'
         }));
 
         if (!this.isProcessingQueue) {
@@ -159,7 +161,7 @@ class WalletMonitoringService {
                 const tx = await this.connection.getParsedTransaction(signature, options);
                 
                 if (!tx) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Transaction ${signature} not found (attempt ${attempt})`);
+                    console.warn(`[${new Date().toISOString()}] ⚠️ gRPC Transaction ${signature} not found (attempt ${attempt})`);
                     if (attempt < maxRetries) {
                         await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
                         continue;
@@ -168,13 +170,13 @@ class WalletMonitoringService {
                 }
     
                 if (tx.meta?.err) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Transaction ${signature} failed:`, tx.meta.err);
+                    console.warn(`[${new Date().toISOString()}] ⚠️ gRPC Transaction ${signature} failed:`, tx.meta.err);
                     return null;
                 }
     
                 return tx;
             } catch (error) {
-                console.error(`[${new Date().toISOString()}] ❌ Error fetching transaction ${signature} (attempt ${attempt}):`, error.message);
+                console.error(`[${new Date().toISOString()}] ❌ Error fetching gRPC transaction ${signature} (attempt ${attempt}):`, error.message);
                 
                 if (attempt < maxRetries) {
                     console.log(`[${new Date().toISOString()}] ⏳ Waiting before retry...`);
@@ -183,7 +185,7 @@ class WalletMonitoringService {
             }
         }
         
-        console.error(`[${new Date().toISOString()}] ❌ Failed to fetch transaction ${signature} after ${maxRetries} attempts`);
+        console.error(`[${new Date().toISOString()}] ❌ Failed to fetch gRPC transaction ${signature} after ${maxRetries} attempts`);
         return null;
     }
 
@@ -206,7 +208,7 @@ class WalletMonitoringService {
             
             return newPrice;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price in gRPC mode:`, error.message);
             return this.solPriceCache.price; 
         }
     }
@@ -214,7 +216,7 @@ class WalletMonitoringService {
     async processTransaction(sig, wallet) {
         try {
             if (!sig.signature || !sig.blockTime) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid signature object:`, sig);
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid gRPC signature object:`, sig);
                 return null;
             }
 
@@ -239,7 +241,7 @@ class WalletMonitoringService {
 
             const tx = await this.fetchTransactionWithRetry(sig.signature);
             if (!tx || !tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid transaction ${sig.signature} - missing metadata`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid gRPC transaction ${sig.signature} - missing metadata`);
                 return null;
             }
 
@@ -256,13 +258,13 @@ class WalletMonitoringService {
                     );
                 }
                 if (walletIndex === -1 && tx.transaction.message.addressTableLookups) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Versioned transaction with address table lookups not fully supported yet`);
+                    console.warn(`[${new Date().toISOString()}] ⚠️ gRPC Versioned transaction with address table lookups not fully supported yet`);
                     return null;
                 }
             }
 
             if (walletIndex === -1) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletPubkey} not found in transaction ${sig.signature}`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ gRPC Wallet ${walletPubkey} not found in transaction ${sig.signature}`);
                 return null;
             }
 
@@ -288,7 +290,7 @@ class WalletMonitoringService {
                 usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
             }
 
-            console.log(`[${new Date().toISOString()}] 💰 Transaction analysis for ${sig.signature}:`);
+            console.log(`[${new Date().toISOString()}] 💰 gRPC Transaction analysis for ${sig.signature}:`);
             console.log(`  - SOL change: ${solChange.toFixed(6)} SOL`);
             console.log(`  - USDC change: ${usdcChange.toFixed(6)} USDC`);
             console.log(`  - Using thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}, fee>${this.FEE_THRESHOLD}`);
@@ -299,30 +301,30 @@ class WalletMonitoringService {
                 if (usdcChange < 0) {
                     transactionType = 'buy';
                     totalSolAmount = usdcSolEquivalent;
-                    console.log(`[${new Date().toISOString()}] 🛒 USDC buy detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
+                    console.log(`[${new Date().toISOString()}] 🛒 gRPC USDC buy detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
                 } else if (usdcChange > 0) {
                     transactionType = 'sell';
                     totalSolAmount = usdcSolEquivalent;
-                    console.log(`[${new Date().toISOString()}] 💰 USDC sell detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
+                    console.log(`[${new Date().toISOString()}] 💰 gRPC USDC sell detected: ${usdcAmount} USDC (${usdcSolEquivalent.toFixed(6)} SOL equivalent)`);
                 }
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
             } else if (solChange < -this.BUY_THRESHOLD) {
                 transactionType = 'buy';
                 totalSolAmount = Math.abs(solChange);
-                console.log(`[${new Date().toISOString()}] 🛒 SOL buy detected: ${Math.abs(solChange).toFixed(6)} SOL (threshold: ${this.BUY_THRESHOLD})`);
+                console.log(`[${new Date().toISOString()}] 🛒 gRPC SOL buy detected: ${Math.abs(solChange).toFixed(6)} SOL (threshold: ${this.BUY_THRESHOLD})`);
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
             } else if (solChange > this.SELL_THRESHOLD) {
                 transactionType = 'sell';
                 totalSolAmount = solChange;
-                console.log(`[${new Date().toISOString()}] 💰 SOL sell detected: ${solChange.toFixed(6)} SOL (threshold: ${this.SELL_THRESHOLD})`);
+                console.log(`[${new Date().toISOString()}] 💰 gRPC SOL sell detected: ${solChange.toFixed(6)} SOL (threshold: ${this.SELL_THRESHOLD})`);
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
             } else {
-                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - SOL change too small: ${solChange.toFixed(6)} (buy threshold: ${this.BUY_THRESHOLD}, sell threshold: ${this.SELL_THRESHOLD})`);
+                console.log(`[${new Date().toISOString()}] ℹ️ gRPC Transaction ${sig.signature} - SOL change too small: ${solChange.toFixed(6)} (buy threshold: ${this.BUY_THRESHOLD}, sell threshold: ${this.SELL_THRESHOLD})`);
                 return null;
             }
 
             if (tokenChanges.length === 0) {
-                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - no token changes detected`);
+                console.log(`[${new Date().toISOString()}] ℹ️ gRPC Transaction ${sig.signature} - no token changes detected`);
                 return null;
             }
 
@@ -392,7 +394,7 @@ class WalletMonitoringService {
                 );
                 await Promise.all(tokenSavePromises);
 
-                console.log(`[${new Date().toISOString()}] ✅ Successfully saved transaction ${sig.signature} as ${transactionType} with ${totalSolAmount.toFixed(6)} SOL`);
+                console.log(`[${new Date().toISOString()}] ✅ Successfully saved gRPC transaction ${sig.signature} as ${transactionType} with ${totalSolAmount.toFixed(6)} SOL`);
 
                 return {
                     signature: sig.signature,
@@ -403,7 +405,7 @@ class WalletMonitoringService {
                 };
             });
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing transaction ${sig.signature}:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction ${sig.signature}:`, error.message);
             return null;
         }
     }
@@ -466,7 +468,7 @@ class WalletMonitoringService {
             } else if (transactionType === 'sell' && rawChange < 0) {
                 isValidChange = true;
             } else {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping token ${change.mint} - balance change doesn't match transaction type`);
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping gRPC token ${change.mint} - balance change doesn't match transaction type`);
                 continue;
             }
 
@@ -480,7 +482,7 @@ class WalletMonitoringService {
                         decimals: change.decimals,
                         totalRawChange: Math.abs(rawChange)
                     });
-                    console.log(`[${new Date().toISOString()}] 🆕 New mint change: ${change.mint} = ${Math.abs(rawChange)}`);
+                    console.log(`[${new Date().toISOString()}] 🆕 New gRPC mint change: ${change.mint} = ${Math.abs(rawChange)}`);
                 }
             }
         }
@@ -557,7 +559,7 @@ class WalletMonitoringService {
         try {
             const tokenInfo = await fetchTokenMetadata(tokenChange.mint, this.connection);
             if (!tokenInfo) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ No metadata for token ${tokenChange.mint}`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ No metadata for gRPC token ${tokenChange.mint}`);
                 return;
             }
 
@@ -587,21 +589,21 @@ class WalletMonitoringService {
             `;
             await client.query(operationQuery, [transactionId, tokenId, amount, transactionType]);
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error saving token operation:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error saving gRPC token operation:`, error.message);
             throw error;
         }
     }
 
     async removeAllWallets(groupId = null) {
         try {
-            console.log(`[${new Date().toISOString()}] 🗑️ Removing all wallets from monitoring service${groupId ? ` for group ${groupId}` : ''}`);
+            console.log(`[${new Date().toISOString()}] 🗑️ Removing all wallets from gRPC monitoring service${groupId ? ` for group ${groupId}` : ''}`);
             
             let query = `SELECT signature FROM transactions t JOIN wallets w ON t.wallet_id = w.id WHERE 1=1`;
             const params = [];
             let paramIndex = 1;
             
             if (groupId) {
-                query += ` AND w.group_id = $${paramIndex}::uuid`;
+                query += ` AND w.group_id = ${paramIndex}::uuid`;
                 params.push(groupId);
             }
             
@@ -616,9 +618,9 @@ class WalletMonitoringService {
             
             const result = await this.db.removeAllWallets(groupId);
             
-            console.log(`[${new Date().toISOString()}] ✅ All wallets removed from monitoring service${groupId ? ` for group ${groupId}` : ''} (${result.deletedCount} wallets)`);
+            console.log(`[${new Date().toISOString()}] ✅ All wallets removed from gRPC monitoring service${groupId ? ` for group ${groupId}` : ''} (${result.deletedCount} wallets)`);
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error removing all wallets from monitoring service:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error removing all wallets from gRPC monitoring service:`, error.message);
             throw error;
         }
     }
@@ -630,7 +632,7 @@ class WalletMonitoringService {
         }
         await redis.quit();
         await this.db.close();
-        console.log(`[${new Date().toISOString()}] ✅ Monitoring service closed`);
+        console.log(`[${new Date().toISOString()}] ✅ gRPC monitoring service closed`);
     }
 }
 

@@ -10,6 +10,7 @@
     "@metaplex-foundation/js": "^0.20.1",
     "@solana/spl-token-registry": "^0.2.4574",
     "@solana/web3.js": "^1.95.3",
+    "@triton-one/yellowstone-grpc": "^4.0.2",
     "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

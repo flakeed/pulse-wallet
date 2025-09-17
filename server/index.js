@@ -5,7 +5,7 @@ const fs = require('fs');
 require('dotenv').config();
 const WalletMonitoringService = require('./src/services/monitoringService');
 const Database = require('./src/database/connection');
-const SolanaWebSocketService = require('./src/services/solanaWebSocketService');
+const SolanaGrpcService = require('./src/services/solanaGrpcService');
 const AuthMiddleware = require('./middleware/authMiddleware');
 const PriceService = require('./src/services/priceService');
 const { redis } = require('./src/services/tokenService');
@@ -16,14 +16,14 @@ const transactionRoutes = require('./routes/transactionsRoutes');
 const miscRoutes = require('./routes/miscRoutes');
 const groupRoutes = require('./routes/groupsRoutes');
 const errorHandler = require('./middleware/errorHandler');
-const { startWebSocketService } = require('./utils/websocketStarter');
+const { startGrpcService } = require('./utils/grpcStarter');
 const { startSessionCleaner } = require('./utils/sessionCleaner');
 
 const app = express();
 const port = process.env.PORT || 5001;
 
 const monitoringService = new WalletMonitoringService();
-const solanaWebSocketService = new SolanaWebSocketService();
+const solanaGrpcService = new SolanaGrpcService();
 const db = new Database();
 const auth = new AuthMiddleware(db);
 const priceService = new PriceService();
@@ -78,7 +78,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
       db.getGroups()
     ]);
     
-    const websocketStatus = solanaWebSocketService.getStatus();
+    const grpcStatus = solanaGrpcService.getStatus();
     
     const duration = Date.now() - startTime;
     console.log(`[${new Date().toISOString()}] ⚡ Global initialization completed in ${duration}ms`);
@@ -94,22 +94,23 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         },
         transactions,
         monitoring: {
-          isMonitoring: websocketStatus.isConnected,
-          processedSignatures: websocketStatus.messageCount,
+          isMonitoring: grpcStatus.isConnected,
+          processedSignatures: grpcStatus.messageCount,
           activeWallets: parseInt(monitoringStatus.active_wallets) || 0,
-          activeGroupId: websocketStatus.activeGroupId,
+          activeGroupId: grpcStatus.activeGroupId,
           todayStats: {
             buyTransactions: parseInt(monitoringStatus.buy_transactions_today) || 0,
             sellTransactions: parseInt(monitoringStatus.sell_transactions_today) || 0,
             solSpent: Number(monitoringStatus.sol_spent_today || 0).toFixed(6),
             solReceived: Number(monitoringStatus.sol_received_today || 0).toFixed(6),
             uniqueTokens: parseInt(monitoringStatus.unique_tokens_today) || 0
-          }
+          },
+          grpcStats: grpcStatus.stats
         },
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'GLOBAL'
+          optimizationLevel: 'GLOBAL_GRPC'
         }
       }
     });
@@ -122,17 +123,17 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
 
 app.use('/api/auth', authRoutes(auth, db));
 app.use('/api/admin', adminRoutes(auth, db));
-app.use('/api/wallets', walletRoutes(auth, db, solanaWebSocketService));
+app.use('/api/wallets', walletRoutes(auth, db, solanaGrpcService));
 app.use('/api/transactions', transactionRoutes(auth, db, redis, sseClients));
-app.use('/api', miscRoutes(auth, db, priceService, solanaWebSocketService));
-app.use('/api/groups', groupRoutes(auth, db, solanaWebSocketService));
+app.use('/api', miscRoutes(auth, db, priceService, solanaGrpcService));
+app.use('/api/groups', groupRoutes(auth, db, solanaGrpcService));
 
 app.use(errorHandler);
 
 process.on('SIGINT', async () => {
   console.log(`[${new Date().toISOString()}] 🛑 Shutting down server...`);
   await monitoringService.close();
-  await solanaWebSocketService.shutdown();
+  await solanaGrpcService.shutdown();
   await priceService.close();
   await redis.quit();
   sseClients.forEach((client) => client.end());
@@ -142,15 +143,15 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log(`[${new Date().toISOString()}] 🛑 Shutting down server...`);
   await monitoringService.close();
-  await solanaWebSocketService.shutdown(); 
+  await solanaGrpcService.shutdown(); 
   await redis.quit();
   sseClients.forEach((client) => client.end());
   process.exit(0);
 });
 
-setTimeout(startWebSocketService(solanaWebSocketService), 2000);
+setTimeout(startGrpcService(solanaGrpcService), 2000);
 startSessionCleaner(auth);
 
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Global wallet monitoring server running on https://0.0.0.0:${port}`);
+  console.log(`[${new Date().toISOString()}] 🚀 Global wallet monitoring server with gRPC running on https://0.0.0.0:${port}`);
 });

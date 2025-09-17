@@ -1,6 +1,6 @@
 const express = require('express');
 const AuthMiddleware = require('../src/middleware/authMiddleware');
-module.exports = (db, solanaWebSocketService) => {
+module.exports = (db, solanaGrpcService) => {
   const router = express.Router();
   const auth = new AuthMiddleware(db);
 
@@ -51,7 +51,7 @@ module.exports = (db, solanaWebSocketService) => {
         }
       }
       
-      await solanaWebSocketService.switchGroup(groupId);
+      await solanaGrpcService.switchGroup(groupId);
       res.json({
         success: true,
         message: `Switched to global group ${groupId || 'all'}`,

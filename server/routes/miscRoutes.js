@@ -1,4 +1,4 @@
-module.exports = (auth, db, priceService, solanaWebSocketService) => {
+module.exports = (auth, db, priceService, solanaGrpcService) => {
   const express = require('express');
   const router = express.Router();
 
@@ -185,7 +185,17 @@ module.exports = (auth, db, priceService, solanaWebSocketService) => {
   });
 
   router.get('/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Backend is running' });
+    const grpcStatus = solanaGrpcService.getStatus();
+    res.json({ 
+      status: 'ok', 
+      message: 'Backend is running with gRPC',
+      grpc: {
+        connected: grpcStatus.isConnected,
+        monitoredWallets: grpcStatus.monitoredWallets,
+        messageCount: grpcStatus.messageCount,
+        stats: grpcStatus.stats
+      }
+    });
   });
 
   router.post('/monitoring/toggle', auth.authRequired, async (req, res) => {
@@ -193,16 +203,16 @@ module.exports = (auth, db, priceService, solanaWebSocketService) => {
       const { action, groupId } = req.body;
   
       if (action === 'start') {
-        await solanaWebSocketService.start(groupId);
-        res.json({ success: true, message: `Global WebSocket monitoring started${groupId ? ` for group ${groupId}` : ''}` });
+        await solanaGrpcService.start(groupId);
+        res.json({ success: true, message: `Global gRPC monitoring started${groupId ? ` for group ${groupId}` : ''}` });
       } else if (action === 'stop') {
-        await solanaWebSocketService.stop();
-        res.json({ success: true, message: 'Global WebSocket monitoring stopped' });
+        await solanaGrpcService.stop();
+        res.json({ success: true, message: 'Global gRPC monitoring stopped' });
       } else {
         res.status(400).json({ error: 'Invalid action. Use "start" or "stop"' });
       }
     } catch (error) {
-      console.error(`[${new Date().toISOString()}] ❌ Error toggling global monitoring:`, error);
+      console.error(`[${new Date().toISOString()}] ❌ Error toggling global gRPC monitoring:`, error);
       res.status(500).json({ error: error.message });
     }
   });
