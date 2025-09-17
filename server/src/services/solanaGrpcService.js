@@ -1,4 +1,5 @@
-const { Client, SubscribeRequest, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions } = require("@triton-one/yellowstone-grpc");
+const grpcPackage = require("@triton-one/yellowstone-grpc");
+const { SubscribeRequest, SubscribeRequestFilterTransactions, CommitmentLevel } = grpcPackage;
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 
@@ -47,42 +48,24 @@ class SolanaGrpcService {
     async connect() {
         try {
             console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcEndpoint}`);
-            try {
-                this.client = new Client(this.grpcEndpoint, undefined, {
-                    'grpc.keepalive_time_ms': 30000,
-                    'grpc.keepalive_timeout_ms': 5000,
-                    'grpc.keepalive_permit_without_calls': true,
-                    'grpc.http2.max_pings_without_data': 0,
-                    'grpc.http2.min_time_between_pings_ms': 10000,
-                    'grpc.http2.min_ping_interval_without_data_ms': 30000
-                });
-            } catch (clientError) {
-                console.log(`[${new Date().toISOString()}] ⚠️ Direct Client creation failed, trying alternative method...`);
-                const grpc = require("@triton-one/yellowstone-grpc");
-                if (grpc.default && grpc.default.Client) {
-                    this.client = new grpc.default.Client(this.grpcEndpoint);
-                } else if (grpc.createClient) {
-                    this.client = grpc.createClient(this.grpcEndpoint);
-                } else {
-                    console.log(`[${new Date().toISOString()}] 📦 Available exports:`, Object.keys(grpc));
-                    throw new Error(`Cannot create gRPC client. Available exports: ${Object.keys(grpc).join(', ')}`);
-                }
+            const Client = grpcPackage.default;
+            if (!Client) {
+                throw new Error('gRPC Client not found in default export');
             }
+            this.client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_timeout_ms': 5000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 10000,
+                'grpc.http2.min_ping_interval_without_data_ms': 30000
+            });
             console.log(`[${new Date().toISOString()}] ✅ Connected to gRPC Solana stream`);
             this.reconnectAttempts = 0;
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC client:`, error.message);
-            try {
-                const grpc = require("@triton-one/yellowstone-grpc");
-                console.log(`[${new Date().toISOString()}] 🔍 gRPC module structure:`, {
-                    hasClient: !!grpc.Client,
-                    hasDefault: !!grpc.default,
-                    exports: Object.keys(grpc),
-                    defaultExports: grpc.default ? Object.keys(grpc.default) : 'no default'
-                });
-            } catch (diagError) {
-                console.error(`[${new Date().toISOString()}] ❌ Cannot diagnose gRPC module:`, diagError.message);
-            }
+            console.log(`[${new Date().toISOString()}] 🔍 Default export type:`, typeof grpcPackage.default);
+            console.log(`[${new Date().toISOString()}] 🔍 Default export:`, grpcPackage.default);
             throw error;
         }
     }
@@ -110,51 +93,22 @@ class SolanaGrpcService {
     async subscribeToTransactions() {
         try {
             console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
-            let request;
-            try {
-                request = SubscribeRequest.fromJSON({
-                    accounts: {},
-                    slots: {},
-                    transactions: {
-                        "solana_transactions": {
-                            accountInclude: [],
-                            accountExclude: [],
-                            accountRequired: []
-                        }
-                    },
-                    blocks: {},
-                    blocksMeta: {},
-                    accountsDataSlice: [],
-                    commitment: 1,
-                    entry: {}
-                });
-            } catch (requestError) {
-                console.log(`[${new Date().toISOString()}] ⚠️ SubscribeRequest.fromJSON failed, trying alternative...`);
-                const grpc = require("@triton-one/yellowstone-grpc");
-                if (grpc.SubscribeRequest) {
-                    request = new grpc.SubscribeRequest({
-                        transactions: {
-                            "solana_transactions": {
-                                accountInclude: [],
-                                accountExclude: [],
-                                accountRequired: []
-                            }
-                        },
-                        commitment: 1
-                    });
-                } else {
-                    request = {
-                        transactions: {
-                            "solana_transactions": {
-                                accountInclude: [],
-                                accountExclude: [],
-                                accountRequired: []
-                            }
-                        },
-                        commitment: 1
-                    };
-                }
-            }
+            const request = SubscribeRequest.fromJSON({
+                accounts: {},
+                slots: {},
+                transactions: {
+                    "client": {
+                        accountInclude: [],
+                        accountExclude: [],
+                        accountRequired: []
+                    }
+                },
+                blocks: {},
+                blocksMeta: {},
+                accountsDataSlice: [],
+                commitment: CommitmentLevel.CONFIRMED,
+                entry: {}
+            });
             this.stream = await this.client.subscribe();
             await this.stream.write(request, { waitForReady: true });
             console.log(`[${new Date().toISOString()}] ✅ gRPC subscription request sent`);
@@ -163,7 +117,7 @@ class SolanaGrpcService {
             }
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ gRPC subscription error:`, error.message);
-            console.error(`[${new Date().toISOString()}] 🔍 Error details:`, error);
+            console.error(`[${new Date().toISOString()}] 🔍 Error details:`, error.stack);
             if (this.isStarted) {
                 await this.handleReconnect();
             }
