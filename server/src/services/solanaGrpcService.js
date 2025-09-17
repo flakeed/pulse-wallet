@@ -2,7 +2,7 @@ const grpcPackage = require("@triton-one/yellowstone-grpc");
 const { SubscribeRequest, SubscribeRequestFilterTransactions, CommitmentLevel } = grpcPackage;
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
-
+const { PublicKey } = require('@solana/web3.js');
 class SolanaGrpcService {
     constructor() {
         this.grpcEndpoint = process.env.GRPC_ENDPOINT || 'http://45.134.108.254:10000';
@@ -92,6 +92,7 @@ async subscribeToTransactions() {
   if (this.stream) {
     try {
       await this.stream.end();
+      console.log(`[${new Date().toISOString()}] 🔌 Closed existing gRPC stream`);
     } catch (e) {
       console.warn(`[${new Date().toISOString()}] ⚠️ Error ending existing stream:`, e.message);
     }
@@ -121,7 +122,11 @@ async subscribeToTransactions() {
             accountInclude: accountsToMonitor,
             accountExclude: [],
             accountRequired: accountsToMonitor,
-            includeMeta: true
+            vote: false, 
+            failed: false,
+            signature: true,
+            accountData: true,
+            meta: true
           }
         },
         blocks: {},
@@ -140,7 +145,11 @@ async subscribeToTransactions() {
             accountInclude: [],
             accountExclude: [],
             accountRequired: [],
-            includeMeta: true
+            vote: false,
+            failed: false,
+            signature: true,
+            accountData: true,
+            meta: true
           }
         },
         blocks: {},
@@ -237,198 +246,209 @@ startMessageProcessing() {
         }
     }
 
-    async processTransaction(transactionData) {
+async processTransaction(transactionData) {
+  try {
+    const transaction = transactionData.transaction;
+    
+    if (!transaction) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no transaction data`);
+      return;
+    }
+    
+    const signatureBuffer = transaction.signature?.data;
+    if (!signatureBuffer) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no signature`);
+      return;
+    }
+    const signature = new PublicKey(signatureBuffer).toBase58();
+    console.log(`[${new Date().toISOString()}] 🔍 Processing transaction: ${signature.slice(0, 8)}...`);
+
+    if (this.signatureCache.has(signature)) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - duplicate transaction: ${signature.slice(0, 8)}...`);
+      return;
+    }
+    this.signatureCache.set(signature, true);
+
+    let meta = transactionData.meta;
+    if (!meta) {
+      console.log(`[${new Date().toISOString()}] ⚠️ No metadata in gRPC data, fetching from RPC...`);
+      const connection = new Connection(process.env.SOLANA_RPC_URL, {
+        commitment: 'confirmed'
+      });
+      const tx = await connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed'
+      });
+      if (tx) {
+        meta = tx.meta;
+        console.log(`[${new Date().toISOString()}] ✅ Fetched metadata from RPC for ${signature.slice(0, 8)}...`);
+      } else {
+        console.log(`[${new Date().toISOString()}] ⏭️ Skipping - could not fetch metadata for ${signature.slice(0, 8)}...`);
+        return;
+      }
+    }
+    
+    if (meta.err) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - transaction failed with error:`, meta.err);
+      return;
+    }
+
+    const accountKeys = this.extractAccountKeys(transaction);
+    console.log(`[${new Date().toISOString()}] 🔍 Extracted ${accountKeys.length} account keys from transaction`);
+    
+    if (accountKeys.length === 0) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no account keys found`);
+      return;
+    }
+    
+    const relevantWallets = [];
+    accountKeys.forEach(account => {
+      const isMonitored = this.monitoredWallets.has(account);
+      if (isMonitored) {
+        console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet in transaction: ${account.slice(0, 8)}...`);
+        relevantWallets.push(account);
+      }
+    });
+
+    if (relevantWallets.length === 0) {
+      console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets found in transaction ${signature.slice(0, 8)}...`);
+      if (accountKeys.length > 0) {
+        console.log(`[${new Date().toISOString()}] 🔍 Account keys in transaction: ${accountKeys.slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
+        console.log(`[${new Date().toISOString()}] 🔍 First few monitored wallets: ${Array.from(this.monitoredWallets).slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
+      }
+      return;
+    }
+
+    this.stats.filteredTransactions++;
+    const blockTime = this.extractBlockTime(transactionData);
+
+    console.log(`[${new Date().toISOString()}] 🎯 Relevant transaction found: ${signature.slice(0, 8)}... for ${relevantWallets.length} wallet(s)`);
+
+    for (const walletAddress of relevantWallets) {
+      const wallet = await this.db.getWalletByAddress(walletAddress);
+      if (!wallet) {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress.slice(0, 8)}... not found in database`);
+        continue;
+      }
+
+      if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+        console.log(`[${new Date().toISOString()}] ⏭️ Skipping wallet ${walletAddress.slice(0, 8)}... - wrong group (${wallet.group_id} vs ${this.activeGroupId})`);
+        continue;
+      }
+
+      console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
+      
+      await this.monitoringService.processWebhookMessage({
+        signature,
+        walletAddress,
+        blockTime,
+        groupId: wallet.group_id
+      });
+      
+      this.stats.processedTransactions++;
+    }
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] ❌ Error processing transaction:`, error.message);
+    console.error(`[${new Date().toISOString()}] 🔍 Transaction data structure:`, JSON.stringify(transactionData, null, 2).slice(0, 500));
+    this.stats.errors++;
+  }
+}
+
+extractAccountKeys(transaction) {
+  const accountKeys = [];
+  try {
+    console.log(`[${new Date().toISOString()}] 🔍 Extracting account keys from transaction structure`);
+    
+    const message = transaction.message || transaction.transaction?.message;
+    if (!message) {
+      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no message in transaction`);
+      return accountKeys;
+    }
+
+    if (message.accountKeys) {
+      console.log(`[${new Date().toISOString()}] 🔍 Found ${message.accountKeys.length} account keys in message`);
+      message.accountKeys.forEach((key, index) => {
         try {
-            console.log(`[${new Date().toISOString()}] 🔍 Raw transactionData:`, JSON.stringify(transactionData, null, 2).slice(0, 1000));
-            const transaction = transactionData.transaction;
-            const meta = transactionData.meta;
-            
-            if (!transaction) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no transaction data`);
-                return;
+          const keyString = typeof key === 'string' ? key : (key.pubkey ? key.pubkey.toString() : new PublicKey(key).toBase58());
+          if (keyString && typeof keyString === 'string' && keyString.length >= 32) {
+            accountKeys.push(keyString);
+            if (index < 5) {
+              console.log(`[${new Date().toISOString()}] 🔍 Account ${index}: ${keyString.slice(0, 8)}...`);
             }
-            
-            if (!meta) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no meta data`);
-                return;
-            }
-            
-            if (meta.err) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - transaction failed with error:`, meta.err);
-                return;
-            }
+          }
+        } catch (keyError) {
+          console.warn(`[${new Date().toISOString()}] ⚠️ Error processing account key ${index}:`, keyError.message);
+        }
+      });
+    }
 
-            const signature = transaction.signatures?.[0];
-            if (!signature) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no signature`);
-                return;
-            }
+    if (message.staticAccountKeys) {
+      console.log(`[${new Date().toISOString()}] 🔍 Found ${message.staticAccountKeys.length} static account keys`);
+      message.staticAccountKeys.forEach(key => {
+        try {
+          const keyString = typeof key === 'string' ? key : new PublicKey(key).toBase58();
+          if (keyString && !accountKeys.includes(keyString)) {
+            accountKeys.push(keyString);
+          }
+        } catch (keyError) {
+          console.warn(`[${new Date().toISOString()}] ⚠️ Error processing static account key:`, keyError.message);
+        }
+      });
+    }
 
-            console.log(`[${new Date().toISOString()}] 🔍 Processing transaction: ${signature.slice(0, 8)}...`);
-
-            if (!transaction.message) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no message in transaction`);
-                return;
+    if (message.addressTableLookups && Array.isArray(message.addressTableLookups)) {
+      console.log(`[${new Date().toISOString()}] 🔍 Found ${message.addressTableLookups.length} address table lookups`);
+      message.addressTableLookups.forEach(lookup => {
+        try {
+          if (lookup.accountKey) {
+            const keyString = typeof lookup.accountKey === 'string' ? lookup.accountKey : new PublicKey(lookup.accountKey).toBase58();
+            if (keyString && !accountKeys.includes(keyString)) {
+              accountKeys.push(keyString);
             }
+          }
+        } catch (lookupError) {
+          console.warn(`[${new Date().toISOString()}] ⚠️ Error processing address table lookup:`, lookupError.message);
+        }
+      });
+    }
 
-            const accountKeys = this.extractAccountKeys(transaction);
-            console.log(`[${new Date().toISOString()}] 🔍 Extracted ${accountKeys.length} account keys from transaction`);
-            
-            if (accountKeys.length === 0) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping - no account keys found`);
-                return;
-            }
-            
-            const relevantWallets = [];
-            accountKeys.forEach(account => {
-                const isMonitored = this.monitoredWallets.has(account);
-                if (isMonitored) {
-                    console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet in transaction: ${account.slice(0, 8)}...`);
-                    relevantWallets.push(account);
+    if (message.instructions && Array.isArray(message.instructions)) {
+      message.instructions.forEach((instruction, instrIndex) => {
+        try {
+          if (instruction.accounts && Array.isArray(instruction.accounts)) {
+            instruction.accounts.forEach(accountIndex => {
+              try {
+                if (typeof accountIndex === 'number' && message.accountKeys?.[accountIndex]) {
+                  const key = message.accountKeys[accountIndex];
+                  const keyString = typeof key === 'string' ? key : new PublicKey(key).toBase58();
+                  if (keyString && !accountKeys.includes(keyString)) {
+                    accountKeys.push(keyString);
+                  }
                 }
+              } catch (accountError) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Error processing account index ${accountIndex}:`, accountError.message);
+              }
             });
-
-            if (relevantWallets.length === 0) {
-                console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets found in transaction ${signature.slice(0, 8)}...`);
-                if (accountKeys.length > 0) {
-                    console.log(`[${new Date().toISOString()}] 🔍 Account keys in transaction: ${accountKeys.slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
-                    console.log(`[${new Date().toISOString()}] 🔍 First few monitored wallets: ${Array.from(this.monitoredWallets).slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
-                }
-                return;
-            }
-
-            this.stats.filteredTransactions++;
-            const blockTime = this.extractBlockTime(transactionData);
-
-            console.log(`[${new Date().toISOString()}] 🎯 Relevant transaction found: ${signature.slice(0, 8)}... for ${relevantWallets.length} wallet(s)`);
-
-            for (const walletAddress of relevantWallets) {
-                const wallet = await this.db.getWalletByAddress(walletAddress);
-                if (!wallet) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in database`);
-                    continue;
-                }
-
-                if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-                    console.log(`[${new Date().toISOString()}] ⏭️ Skipping wallet ${walletAddress.slice(0, 8)}... - wrong group (${wallet.group_id} vs ${this.activeGroupId})`);
-                    continue;
-                }
-
-                console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0,8)}... (group: ${wallet.group_id || 'none'})`);
-                
-                await this.monitoringService.processWebhookMessage({
-                    signature: signature,
-                    walletAddress: walletAddress,
-                    blockTime: blockTime,
-                    groupId: wallet.group_id
-                });
-                
-                this.stats.processedTransactions++;
-            }
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing transaction:`, error.message);
-            console.error(`[${new Date().toISOString()}] 🔍 Transaction data structure:`, JSON.stringify(transactionData, null, 2).slice(0, 500));
-            this.stats.errors++;
+          }
+        } catch (instrError) {
+          console.warn(`[${new Date().toISOString()}] ⚠️ Error processing instruction ${instrIndex}:`, instrError.message);
         }
+      });
     }
 
-    extractAccountKeys(transaction) {
-        const accountKeys = [];
-        try {
-            console.log(`[${new Date().toISOString()}] 🔍 Extracting account keys from transaction structure`);
-            
-            if (transaction.message?.accountKeys) {
-                console.log(`[${new Date().toISOString()}] 🔍 Found ${transaction.message.accountKeys.length} account keys in message`);
-                transaction.message.accountKeys.forEach((key, index) => {
-                    let keyString;
-                    try {
-                        if (typeof key === 'string') {
-                            keyString = key;
-                        } else if (key && typeof key === 'object') {
-                            keyString = key.pubkey || key.address || key.key;
-                            if (!keyString && key.toString && typeof key.toString === 'function') {
-                                keyString = key.toString();
-                            }
-                        }
-                        
-                        if (keyString && typeof keyString === 'string' && keyString.length >= 32) {
-                            accountKeys.push(keyString);
-                            if (index < 5) { 
-                                console.log(`[${new Date().toISOString()}] 🔍 Account ${index}: ${keyString.slice(0, 8)}...`);
-                            }
-                        }
-                    } catch (keyError) {
-                        console.warn(`[${new Date().toISOString()}] ⚠️ Error processing account key ${index}:`, keyError.message);
-                    }
-                });
-            }
-
-            if (transaction.message?.staticAccountKeys) {
-                console.log(`[${new Date().toISOString()}] 🔍 Found ${transaction.message.staticAccountKeys.length} static account keys`);
-                transaction.message.staticAccountKeys.forEach(key => {
-                    try {
-                        const keyString = typeof key === 'string' ? key : (key.toString ? key.toString() : null);
-                        if (keyString && typeof keyString === 'string' && keyString.length >= 32 && !accountKeys.includes(keyString)) {
-                            accountKeys.push(keyString);
-                        }
-                    } catch (keyError) {
-                        console.warn(`[${new Date().toISOString()}] ⚠️ Error processing static account key:`, keyError.message);
-                    }
-                });
-            }
-
-            if (transaction.message?.addressTableLookups && Array.isArray(transaction.message.addressTableLookups)) {
-                console.log(`[${new Date().toISOString()}] 🔍 Found ${transaction.message.addressTableLookups.length} address table lookups`);
-                transaction.message.addressTableLookups.forEach(lookup => {
-                    try {
-                        if (lookup.accountKey) {
-                            const keyString = typeof lookup.accountKey === 'string' ? lookup.accountKey : lookup.accountKey.toString();
-                            if (keyString && !accountKeys.includes(keyString)) {
-                                accountKeys.push(keyString);
-                            }
-                        }
-                    } catch (lookupError) {
-                        console.warn(`[${new Date().toISOString()}] ⚠️ Error processing address table lookup:`, lookupError.message);
-                    }
-                });
-            }
-
-            if (transaction.message?.instructions && Array.isArray(transaction.message.instructions)) {
-                transaction.message.instructions.forEach((instruction, instrIndex) => {
-                    try {
-                        if (instruction.accounts && Array.isArray(instruction.accounts)) {
-                            instruction.accounts.forEach(accountIndex => {
-                                try {
-                                    if (typeof accountIndex === 'number' && transaction.message.accountKeys?.[accountIndex]) {
-                                        const key = transaction.message.accountKeys[accountIndex];
-                                        const keyString = typeof key === 'string' ? key : (key.pubkey || key.toString());
-                                        if (keyString && !accountKeys.includes(keyString)) {
-                                            accountKeys.push(keyString);
-                                        }
-                                    }
-                                } catch (accountError) {
-                                }
-                            });
-                        }
-                    } catch (instrError) {
-                        console.warn(`[${new Date().toISOString()}] ⚠️ Error processing instruction ${instrIndex}:`, instrError.message);
-                    }
-                });
-            }
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error extracting account keys:`, error.message);
-        }
-        
-        const uniqueKeys = [...new Set(accountKeys)];
-        console.log(`[${new Date().toISOString()}] 🔍 Extracted ${uniqueKeys.length} unique account keys`);
-        
-        if (uniqueKeys.length > 0) {
-            console.log(`[${new Date().toISOString()}] 🔍 Sample keys: ${uniqueKeys.slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
-        }
-        
-        return uniqueKeys;
+    const uniqueKeys = [...new Set(accountKeys)];
+    console.log(`[${new Date().toISOString()}] 🔍 Extracted ${uniqueKeys.length} unique account keys`);
+    
+    if (uniqueKeys.length > 0) {
+      console.log(`[${new Date().toISOString()}] 🔍 Sample keys: ${uniqueKeys.slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
     }
+    
+    return uniqueKeys;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] ❌ Error extracting account keys:`, error.message);
+    return [];
+  }
+}
 
     extractBlockTime(transactionData) {
         try {
