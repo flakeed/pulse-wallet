@@ -237,6 +237,7 @@ startMessageProcessing() {
 
     async processTransaction(transactionData) {
         try {
+            console.log(`[${new Date().toISOString()}] 🔍 Raw transactionData:`, JSON.stringify(transactionData, null, 2).slice(0, 1000));
             const transaction = transactionData.transaction;
             const meta = transactionData.meta;
             
