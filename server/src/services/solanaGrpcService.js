@@ -64,8 +64,6 @@ class SolanaGrpcService {
             this.reconnectAttempts = 0;
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC client:`, error.message);
-            console.log(`[${new Date().toISOString()}] 🔍 Default export type:`, typeof grpcPackage.default);
-            console.log(`[${new Date().toISOString()}] 🔍 Default export:`, grpcPackage.default);
             throw error;
         }
     }
@@ -93,22 +91,53 @@ class SolanaGrpcService {
     async subscribeToTransactions() {
         try {
             console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
-            const request = SubscribeRequest.fromJSON({
-                accounts: {},
-                slots: {},
-                transactions: {
-                    "client": {
-                        accountInclude: [],
-                        accountExclude: [],
-                        accountRequired: []
-                    }
-                },
-                blocks: {},
-                blocksMeta: {},
-                accountsDataSlice: [],
-                commitment: CommitmentLevel.CONFIRMED,
-                entry: {}
-            });
+            
+            const accountsToMonitor = Array.from(this.monitoredWallets);
+            
+            let request;
+            if (accountsToMonitor.length > 0) {
+                request = SubscribeRequest.fromJSON({
+                    accounts: {
+                        "monitored_accounts": {
+                            account: accountsToMonitor,
+                            owner: [],
+                            filters: []
+                        }
+                    },
+                    slots: {},
+                    transactions: {
+                        "monitored_transactions": {
+                            accountInclude: accountsToMonitor,
+                            accountExclude: [],
+                            accountRequired: accountsToMonitor
+                        }
+                    },
+                    blocks: {},
+                    blocksMeta: {},
+                    accountsDataSlice: [],
+                    commitment: CommitmentLevel.CONFIRMED,
+                    entry: {}
+                });
+                console.log(`[${new Date().toISOString()}] 📡 Subscribing to ${accountsToMonitor.length} specific accounts`);
+            } else {
+                request = SubscribeRequest.fromJSON({
+                    accounts: {},
+                    slots: {},
+                    transactions: {
+                        "all_transactions": {
+                            accountInclude: [],
+                            accountExclude: [],
+                            accountRequired: []
+                        }
+                    },
+                    blocks: {},
+                    blocksMeta: {},
+                    accountsDataSlice: [],
+                    commitment: CommitmentLevel.CONFIRMED,
+                    entry: {}
+                });
+                console.log(`[${new Date().toISOString()}] 📡 No wallets to monitor, subscribing to all transactions`);
+            }
             
             this.stream = await this.client.subscribe();
             
@@ -131,10 +160,21 @@ class SolanaGrpcService {
     async handleGrpcMessage(data) {
         try {
             this.messageCount++;
+            
+            if (this.messageCount % 100 === 0) {
+                console.log(`[${new Date().toISOString()}] 📊 gRPC messages processed: ${this.messageCount}`);
+            }
+            
             if (data.transaction) {
                 this.stats.totalTransactions++;
+                console.log(`[${new Date().toISOString()}] 📥 Received transaction data`);
                 await this.processTransaction(data.transaction);
             }
+            
+            if (data.account) {
+                console.log(`[${new Date().toISOString()}] 📥 Received account data for: ${data.account.account?.pubkey || 'unknown'}`);
+            }
+            
         } catch (error) {
             this.stats.errors++;
             console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC message:`, error.message);
@@ -145,39 +185,65 @@ class SolanaGrpcService {
         try {
             const transaction = transactionData.transaction;
             const meta = transactionData.meta;
+            
             if (!transaction || !meta || meta.err) {
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping invalid or failed transaction`);
                 return;
             }
+
             const signature = transaction.signatures?.[0];
             if (!signature) {
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping transaction without signature`);
                 return;
             }
+
+            console.log(`[${new Date().toISOString()}] 🔍 Processing transaction: ${signature.slice(0, 8)}...`);
+
             const accountKeys = this.extractAccountKeys(transaction);
-            const relevantWallets = accountKeys.filter(account => 
-                this.monitoredWallets.has(account)
-            );
+            console.log(`[${new Date().toISOString()}] 🔍 Extracted ${accountKeys.length} account keys from transaction`);
+            
+            const relevantWallets = accountKeys.filter(account => {
+                const isMonitored = this.monitoredWallets.has(account);
+                if (isMonitored) {
+                    console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet in transaction: ${account.slice(0, 8)}...`);
+                }
+                return isMonitored;
+            });
+
             if (relevantWallets.length === 0) {
+                console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets found in transaction ${signature.slice(0, 8)}...`);
+                if (accountKeys.length > 0) {
+                    console.log(`[${new Date().toISOString()}] 🔍 Account keys in transaction: ${accountKeys.slice(0, 3).map(k => k.slice(0, 8)).join(', ')}...`);
+                }
                 return;
             }
+
             this.stats.filteredTransactions++;
             const blockTime = this.extractBlockTime(transactionData);
+
             console.log(`[${new Date().toISOString()}] 🎯 Relevant transaction found: ${signature.slice(0, 8)}... for ${relevantWallets.length} wallet(s)`);
+
             for (const walletAddress of relevantWallets) {
                 const wallet = await this.db.getWalletByAddress(walletAddress);
                 if (!wallet) {
                     console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in database`);
                     continue;
                 }
+
                 if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+                    console.log(`[${new Date().toISOString()}] ⏭️ Skipping wallet ${walletAddress.slice(0, 8)}... - wrong group (${wallet.group_id} vs ${this.activeGroupId})`);
                     continue;
                 }
+
                 console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0,8)}... (group: ${wallet.group_id || 'none'})`);
+                
                 await this.monitoringService.processWebhookMessage({
                     signature: signature,
                     walletAddress: walletAddress,
                     blockTime: blockTime,
                     groupId: wallet.group_id
                 });
+                
                 this.stats.processedTransactions++;
             }
         } catch (error) {
@@ -189,53 +255,72 @@ class SolanaGrpcService {
     extractAccountKeys(transaction) {
         const accountKeys = [];
         try {
+            console.log(`[${new Date().toISOString()}] 🔍 Extracting account keys from transaction structure`);
+            
             if (transaction.message?.accountKeys) {
-                transaction.message.accountKeys.forEach(key => {
+                console.log(`[${new Date().toISOString()}] 🔍 Found ${transaction.message.accountKeys.length} account keys in message`);
+                transaction.message.accountKeys.forEach((key, index) => {
+                    let keyString;
                     if (typeof key === 'string') {
-                        accountKeys.push(key);
+                        keyString = key;
                     } else if (key.pubkey) {
-                        accountKeys.push(key.pubkey);
+                        keyString = key.pubkey;
+                    } else if (key.toString) {
+                        keyString = key.toString();
+                    }
+                    
+                    if (keyString) {
+                        accountKeys.push(keyString);
+                        console.log(`[${new Date().toISOString()}] 🔍 Account ${index}: ${keyString.slice(0, 8)}...`);
                     }
                 });
             }
+
+            if (transaction.message?.staticAccountKeys) {
+                console.log(`[${new Date().toISOString()}] 🔍 Found ${transaction.message.staticAccountKeys.length} static account keys`);
+                transaction.message.staticAccountKeys.forEach(key => {
+                    const keyString = typeof key === 'string' ? key : key.toString();
+                    if (keyString && !accountKeys.includes(keyString)) {
+                        accountKeys.push(keyString);
+                    }
+                });
+            }
+
             if (transaction.message?.addressTableLookups) {
+                console.log(`[${new Date().toISOString()}] 🔍 Found address table lookups`);
                 transaction.message.addressTableLookups.forEach(lookup => {
-                    if (lookup.writableIndexes) {
-                        lookup.writableIndexes.forEach(index => {
-                            if (lookup.accountKey) {
-                                accountKeys.push(lookup.accountKey);
-                            }
-                        });
-                    }
-                    if (lookup.readonlyIndexes) {
-                        lookup.readonlyIndexes.forEach(index => {
-                            if (lookup.accountKey) {
-                                accountKeys.push(lookup.accountKey);
-                            }
-                        });
+                    if (lookup.accountKey) {
+                        const keyString = typeof lookup.accountKey === 'string' ? lookup.accountKey : lookup.accountKey.toString();
+                        if (keyString && !accountKeys.includes(keyString)) {
+                            accountKeys.push(keyString);
+                        }
                     }
                 });
             }
+
             if (transaction.message?.instructions) {
                 transaction.message.instructions.forEach(instruction => {
                     if (instruction.accounts) {
                         instruction.accounts.forEach(accountIndex => {
                             if (transaction.message.accountKeys?.[accountIndex]) {
                                 const key = transaction.message.accountKeys[accountIndex];
-                                if (typeof key === 'string') {
-                                    accountKeys.push(key);
-                                } else if (key.pubkey) {
-                                    accountKeys.push(key.pubkey);
+                                const keyString = typeof key === 'string' ? key : (key.pubkey || key.toString());
+                                if (keyString && !accountKeys.includes(keyString)) {
+                                    accountKeys.push(keyString);
                                 }
                             }
                         });
                     }
                 });
             }
+
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error extracting account keys:`, error.message);
         }
-        return [...new Set(accountKeys)];
+        
+        const uniqueKeys = [...new Set(accountKeys)];
+        console.log(`[${new Date().toISOString()}] 🔍 Extracted ${uniqueKeys.length} unique account keys`);
+        return uniqueKeys;
     }
 
     extractBlockTime(transactionData) {
@@ -256,23 +341,36 @@ class SolanaGrpcService {
         }
     }
 
+    async updateSubscription() {
+        if (!this.isStarted || !this.stream) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Cannot update subscription - service not started`);
+            return;
+        }
+
+        try {
+            console.log(`[${new Date().toISOString()}] 🔄 Updating gRPC subscription with current wallets`);
+            
+            await this.stream.end();
+            
+            await this.subscribeToTransactions();
+            
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error updating subscription:`, error.message);
+            await this.handleReconnect();
+        }
+    }
+
     async subscribeToWallet(walletAddress) {
         try {
             this.monitoredWallets.add(walletAddress);
             console.log(`[${new Date().toISOString()}] ✅ Added wallet ${walletAddress.slice(0, 8)}... to gRPC monitoring (total: ${this.monitoredWallets.size})`);
+            
+            await this.updateSubscription();
+            
             return { success: true };
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error adding wallet to gRPC monitoring:`, error.message);
             throw error;
-        }
-    }
-
-    async unsubscribeFromWallet(walletAddress) {
-        try {
-            this.monitoredWallets.delete(walletAddress);
-            console.log(`[${new Date().toISOString()}] ✅ Removed wallet ${walletAddress.slice(0, 8)}... from gRPC monitoring (total: ${this.monitoredWallets.size})`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error removing wallet from gRPC monitoring:`, error.message);
         }
     }
 
@@ -285,6 +383,9 @@ class SolanaGrpcService {
                 this.monitoredWallets.add(address);
                 successful++;
             });
+            
+            await this.updateSubscription();
+            
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ gRPC batch subscription completed in ${duration}ms:`);
             console.log(`  - Added: ${successful} wallets`);
@@ -293,6 +394,35 @@ class SolanaGrpcService {
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC batch subscription:`, error.message);
             return { successful, failed: walletAddresses.length - successful, errors: [error.message] };
+        }
+    }
+
+    async switchGroup(groupId) {
+        try {
+            const startTime = Date.now();
+            console.log(`[${new Date().toISOString()}] 🔄 Switching to group ${groupId || 'all'} in gRPC service`);
+            this.activeGroupId = groupId;
+            await this.loadMonitoredWallets();
+            
+            await this.updateSubscription();
+            
+            const duration = Date.now() - startTime;
+            console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
+            throw error;
+        }
+    }
+
+    async unsubscribeFromWallet(walletAddress) {
+        try {
+            this.monitoredWallets.delete(walletAddress);
+            console.log(`[${new Date().toISOString()}] ✅ Removed wallet ${walletAddress.slice(0, 8)}... from gRPC monitoring (total: ${this.monitoredWallets.size})`);
+            
+            await this.updateSubscription();
+            
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error removing wallet from gRPC monitoring:`, error.message);
         }
     }
 
@@ -305,6 +435,9 @@ class SolanaGrpcService {
                 this.monitoredWallets.delete(address);
                 successful++;
             });
+            
+            await this.updateSubscription();
+            
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ gRPC batch unsubscription completed in ${duration}ms: ${successful} wallets removed`);
             console.log(`[${new Date().toISOString()}] 📊 Remaining monitored wallets: ${this.monitoredWallets.size}`);
@@ -336,6 +469,9 @@ class SolanaGrpcService {
             if (shouldReload) {
                 console.log(`[${new Date().toISOString()}] 🔄 Reloading monitored wallets after group deletion...`);
                 await this.loadMonitoredWallets();
+                
+                await this.updateSubscription();
+                
                 console.log(`[${new Date().toISOString()}] ✅ Reload completed: ${this.monitoredWallets.size} wallets now monitored`);
             }
             const duration = Date.now() - startTime;
@@ -355,20 +491,6 @@ class SolanaGrpcService {
             };
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in gRPC removeAllWallets:`, error.message);
-            throw error;
-        }
-    }
-
-    async switchGroup(groupId) {
-        try {
-            const startTime = Date.now();
-            console.log(`[${new Date().toISOString()}] 🔄 Switching to group ${groupId || 'all'} in gRPC service`);
-            this.activeGroupId = groupId;
-            await this.loadMonitoredWallets();
-            const duration = Date.now() - startTime;
-            console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
             throw error;
         }
     }
