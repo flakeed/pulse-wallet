@@ -31,22 +31,35 @@ module.exports = (auth, db, redis, sseClients) => {
       
       await Promise.all(channels.map(channel => subscriber.subscribe(channel)));
   
-      const messageHandler = (channel, message) => {
-        if (res.writable) {
-          try {
-            const transaction = JSON.parse(message);
+const messageHandler = (channel, message) => {
+    if (!res.writable) return;
+    
+    try {
+        const data = JSON.parse(message);
+        
+        if (data.type === 'GROUP_SWITCH') {
+            console.log(`[${new Date().toISOString()}] 🔄 SSE client received group switch: ${data.groupId}`);
             
-            if (groupId && transaction.groupId !== groupId) {
-              return; 
+            res.write(`event: group-switch\ndata: ${JSON.stringify(data)}\n\n`);
+            
+            if (data.groupId !== undefined) {
+                currentGroupId = data.groupId; 
             }
-            
-            console.log(`[${new Date().toISOString()}] 📡 Broadcasting SSE message: ${transaction.signature} for group ${groupId || 'all'}`);
-            res.write(`data: ${message}\n\n`);
-          } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error parsing SSE message:`, error.message);
-          }
+            return;
         }
-      };
+        
+        const transaction = data;
+        if (groupId && transaction.groupId !== groupId) {
+            return; 
+        }
+        
+        console.log(`[${new Date().toISOString()}] 📡 Broadcasting SSE transaction: ${transaction.signature}`);
+        res.write(`data: ${message}\n\n`);
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error parsing SSE message:`, error.message);
+    }
+};
   
       subscriber.on('message', messageHandler);
   

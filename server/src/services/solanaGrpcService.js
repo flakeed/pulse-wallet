@@ -88,74 +88,126 @@ class SolanaGrpcService {
         }
     }
 
-    async subscribeToTransactions() {
+async subscribeToTransactions() {
+    if (this.stream) {
         try {
-            console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
-            
-            const accountsToMonitor = Array.from(this.monitoredWallets);
-            
-            let request;
-            if (accountsToMonitor.length > 0) {
-                request = SubscribeRequest.fromJSON({
-                    accounts: {
-                        "monitored_accounts": {
-                            account: accountsToMonitor,
-                            owner: [],
-                            filters: []
-                        }
-                    },
-                    slots: {},
-                    transactions: {
-                        "monitored_transactions": {
-                            accountInclude: accountsToMonitor,
-                            accountExclude: [],
-                            accountRequired: accountsToMonitor
-                        }
-                    },
-                    blocks: {},
-                    blocksMeta: {},
-                    accountsDataSlice: [],
-                    commitment: CommitmentLevel.CONFIRMED,
-                    entry: {}
-                });
-                console.log(`[${new Date().toISOString()}] 📡 Subscribing to ${accountsToMonitor.length} specific accounts`);
-            } else {
-                request = SubscribeRequest.fromJSON({
-                    accounts: {},
-                    slots: {},
-                    transactions: {
-                        "all_transactions": {
-                            accountInclude: [],
-                            accountExclude: [],
-                            accountRequired: []
-                        }
-                    },
-                    blocks: {},
-                    blocksMeta: {},
-                    accountsDataSlice: [],
-                    commitment: CommitmentLevel.CONFIRMED,
-                    entry: {}
-                });
-                console.log(`[${new Date().toISOString()}] 📡 No wallets to monitor, subscribing to all transactions`);
-            }
-            
-            this.stream = await this.client.subscribe();
-            
-            await this.stream.write(request);
-            
-            console.log(`[${new Date().toISOString()}] ✅ gRPC subscription request sent`);
-            
+            await this.stream.end();
+        } catch (e) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Error ending existing stream:`, e.message);
+        }
+        this.stream = null;
+    }
+
+    try {
+        console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
+        
+        const accountsToMonitor = Array.from(this.monitoredWallets);
+        console.log(`[${new Date().toISOString()}] 📊 Monitoring ${accountsToMonitor.length} wallets:`, 
+            accountsToMonitor.slice(0, 3).map(a => a.slice(0, 8)).join(', '));
+        
+        let request;
+        if (accountsToMonitor.length > 0) {
+            request = SubscribeRequest.fromJSON({
+                accounts: {
+                    "monitored_accounts": {
+                        account: accountsToMonitor,
+                        owner: [],
+                        filters: []
+                    }
+                },
+                slots: {},
+                transactions: {
+                    "monitored_transactions": {
+                        accountInclude: accountsToMonitor,
+                        accountExclude: [],
+                        accountRequired: accountsToMonitor
+                    }
+                },
+                blocks: {},
+                blocksMeta: {},
+                accountsDataSlice: [],
+                commitment: CommitmentLevel.CONFIRMED,
+                entry: {}
+            });
+            console.log(`[${new Date().toISOString()}] 📡 Subscribing to ${accountsToMonitor.length} specific accounts`);
+        } else {
+            request = SubscribeRequest.fromJSON({
+                accounts: {},
+                slots: {},
+                transactions: {
+                    "all_transactions": {
+                        accountInclude: [],
+                        accountExclude: [],
+                        accountRequired: []
+                    }
+                },
+                blocks: {},
+                blocksMeta: {},
+                accountsDataSlice: [],
+                commitment: CommitmentLevel.CONFIRMED,
+                entry: {}
+            });
+            console.log(`[${new Date().toISOString()}] 📡 No wallets to monitor, subscribing to all transactions`);
+        }
+        
+        if (!this.client) {
+            await this.connect();
+        }
+        
+        this.stream = await this.client.subscribe();
+        
+        await Promise.race([
+            this.stream.write(request),
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Subscription write timeout')), 10000)
+            )
+        ]);
+        
+        console.log(`[${new Date().toISOString()}] ✅ gRPC subscription request sent`);
+        
+        this.startMessageProcessing();
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ gRPC subscription error:`, error.message);
+        this.stream = null;
+        
+        if (this.isStarted) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            await this.handleReconnect();
+        }
+        throw error;
+    }
+}
+
+startMessageProcessing() {
+    if (!this.stream) {
+        console.error(`[${new Date().toISOString()}] ❌ Cannot start message processing - no stream`);
+        return;
+    }
+
+    const processMessages = async () => {
+        try {
             for await (const data of this.stream) {
+                if (!this.isStarted) {
+                    console.log(`[${new Date().toISOString()}] ⏹️ Service stopped, ending message processing`);
+                    break;
+                }
+                
                 await this.handleGrpcMessage(data);
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ gRPC subscription error:`, error.message);
-            console.error(`[${new Date().toISOString()}] 🔍 Error details:`, error.stack);
+            console.error(`[${new Date().toISOString()}] ❌ Stream processing error:`, error.message);
+            
             if (this.isStarted) {
-                await this.handleReconnect();
+                console.log(`[${new Date().toISOString()}] 🔄 Stream ended, waiting for reconnection...`);
             }
         }
-    }
+    };
+
+    processMessages().catch(err => {
+        console.error(`[${new Date().toISOString()}] ❌ Background message processing failed:`, err.message);
+    });
+}
 
     async handleGrpcMessage(data) {
         try {
@@ -406,24 +458,39 @@ class SolanaGrpcService {
         }
     }
 
-    async updateSubscription() {
-        if (!this.isStarted || !this.stream) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Cannot update subscription - service not started`);
-            return;
+async updateSubscription() {
+    if (!this.isStarted) {
+        console.log(`[${new Date().toISOString()}] ⏭️ Cannot update subscription - service not started`);
+        return;
+    }
+
+    try {
+        console.log(`[${new Date().toISOString()}] 🔄 Updating gRPC subscription with current wallets`);
+        
+        if (this.stream) {
+            console.log(`[${new Date().toISOString()}] 🔌 Closing existing gRPC stream...`);
+            try {
+                await this.stream.end();
+            } catch (endError) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Error ending stream:`, endError.message);
+            }
+            this.stream = null;
         }
 
-        try {
-            console.log(`[${new Date().toISOString()}] 🔄 Updating gRPC subscription with current wallets`);
-            
-            await this.stream.end();
-            
-            await this.subscribeToTransactions();
-            
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error updating subscription:`, error.message);
-            await this.handleReconnect();
-        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        console.log(`[${new Date().toISOString()}] 🔄 Creating new gRPC subscription...`);
+        await this.subscribeToTransactions();
+        
+        console.log(`[${new Date().toISOString()}] ✅ gRPC subscription updated successfully`);
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error updating subscription:`, error.message);
+        console.error(`[${new Date().toISOString()}] 🔍 Error details:`, error.stack);
+        
+        await this.handleReconnect();
     }
+}
 
     async subscribeToWallet(walletAddress) {
         try {
