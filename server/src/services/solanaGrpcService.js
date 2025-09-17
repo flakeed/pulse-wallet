@@ -102,8 +102,17 @@ async subscribeToTransactions() {
   try {
     console.log(`[${new Date().toISOString()}] 📡 Starting gRPC transaction subscription...`);
     
-    const accountsToMonitor = Array.from(this.monitoredWallets);
-    console.log(`[${new Date().toISOString()}] 📊 Monitoring ${accountsToMonitor.length} wallets:`, 
+    const accountsToMonitor = Array.from(this.monitoredWallets).filter(address => {
+      try {
+        new PublicKey(address);
+        return true;
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Invalid wallet address: ${address.slice(0, 8)}...`, error.message);
+        return false;
+      }
+    });
+    
+    console.log(`[${new Date().toISOString()}] 📊 Monitoring ${accountsToMonitor.length} valid wallets:`, 
       accountsToMonitor.slice(0, 3).map(a => a.slice(0, 8)).join(', '));
     
     let request;
@@ -121,12 +130,7 @@ async subscribeToTransactions() {
           "monitored_transactions": {
             accountInclude: accountsToMonitor,
             accountExclude: [],
-            accountRequired: accountsToMonitor,
-            vote: false, 
-            failed: false,
-            signature: true,
-            accountData: true,
-            meta: true
+            accountRequired: accountsToMonitor
           }
         },
         blocks: {},
@@ -135,7 +139,7 @@ async subscribeToTransactions() {
         commitment: CommitmentLevel.CONFIRMED,
         entry: {}
       });
-      console.log(`[${new Date().toISOString()}] 📡 Subscribing to ${accountsToMonitor.length} specific accounts with metadata`);
+      console.log(`[${new Date().toISOString()}] 📡 Subscribing to ${accountsToMonitor.length} specific accounts`);
     } else {
       request = SubscribeRequest.fromJSON({
         accounts: {},
@@ -144,12 +148,7 @@ async subscribeToTransactions() {
           "all_transactions": {
             accountInclude: [],
             accountExclude: [],
-            accountRequired: [],
-            vote: false,
-            failed: false,
-            signature: true,
-            accountData: true,
-            meta: true
+            accountRequired: []
           }
         },
         blocks: {},
@@ -158,7 +157,7 @@ async subscribeToTransactions() {
         commitment: CommitmentLevel.CONFIRMED,
         entry: {}
       });
-      console.log(`[${new Date().toISOString()}] 📡 No wallets to monitor, subscribing to all transactions with metadata`);
+      console.log(`[${new Date().toISOString()}] 📡 No wallets to monitor, subscribing to all transactions`);
     }
     
     if (!this.client) {
@@ -191,33 +190,35 @@ async subscribeToTransactions() {
 }
 
 startMessageProcessing() {
-    if (!this.stream) {
-        console.error(`[${new Date().toISOString()}] ❌ Cannot start message processing - no stream`);
-        return;
+  this.stream.on('data', async (data) => {
+    try {
+      console.log(`[${new Date().toISOString()}] 📥 Raw gRPC message:`, JSON.stringify(data, null, 2).slice(0, 500));
+      if (data.transaction) {
+        await this.processTransaction(data);
+      }
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC message:`, error.message);
+      this.stats.errors++;
     }
+  });
 
-    const processMessages = async () => {
-        try {
-            for await (const data of this.stream) {
-                if (!this.isStarted) {
-                    console.log(`[${new Date().toISOString()}] ⏹️ Service stopped, ending message processing`);
-                    break;
-                }
-                
-                await this.handleGrpcMessage(data);
-            }
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Stream processing error:`, error.message);
-            
-            if (this.isStarted) {
-                console.log(`[${new Date().toISOString()}] 🔄 Stream ended, waiting for reconnection...`);
-            }
-        }
-    };
+  this.stream.on('error', (error) => {
+    console.error(`[${new Date().toISOString()}] ❌ Stream processing error:`, error.message);
+    this.stream = null;
+    if (this.isStarted) {
+      console.log(`[${new Date().toISOString()}] 🔄 Stream ended, waiting for reconnection...`);
+      setTimeout(() => this.handleReconnect(), 2000);
+    }
+  });
 
-    processMessages().catch(err => {
-        console.error(`[${new Date().toISOString()}] ❌ Background message processing failed:`, err.message);
-    });
+  this.stream.on('end', () => {
+    console.log(`[${new Date().toISOString()}] 🔌 Stream ended`);
+    this.stream = null;
+    if (this.isStarted) {
+      console.log(`[${new Date().toISOString()}] 🔄 Scheduling reconnection...`);
+      setTimeout(() => this.handleReconnect(), 2000);
+    }
+  });
 }
 
     async handleGrpcMessage(data) {
@@ -262,12 +263,6 @@ async processTransaction(transactionData) {
     }
     const signature = new PublicKey(signatureBuffer).toBase58();
     console.log(`[${new Date().toISOString()}] 🔍 Processing transaction: ${signature.slice(0, 8)}...`);
-
-    if (this.signatureCache.has(signature)) {
-      console.log(`[${new Date().toISOString()}] ⏭️ Skipping - duplicate transaction: ${signature.slice(0, 8)}...`);
-      return;
-    }
-    this.signatureCache.set(signature, true);
 
     let meta = transactionData.meta;
     if (!meta) {
