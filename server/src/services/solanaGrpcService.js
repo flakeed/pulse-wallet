@@ -45,40 +45,55 @@ class SolanaGrpcService {
     }
 
     async connectStream() {
-        if (this.isConnecting || this.stream) return;
-        this.isConnecting = true;
-
-        console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcUrl}`);
-        
-        try {
-            if (this.stream) {
-                this.stream.cancel();
-                this.stream = null;
-            }
-
-            const request = {
-                transactions: {
-                    account_include: Array.from(this.monitoredWallets),
-                    vote: false,
-                    failed: false,
-                }
-            };
-
-            this.stream = await this.client.subscribe(request);
-
-            this.stream.on('data', this.handleUpdate.bind(this));
-            this.stream.on('error', this.handleError.bind(this));
-            this.stream.on('end', this.handleEnd.bind(this));
-
-            console.log(`[${new Date().toISOString()}] ✅ Connected to Global Solana gRPC`);
-            this.reconnectAttempts = 0;
-            this.isConnecting = false;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message);
-            this.isConnecting = false;
-            throw error;
-        }
+    if (this.isConnecting || this.stream) {
+        console.log(`[${new Date().toISOString()}] ℹ️ Skipping connectStream: isConnecting=${this.isConnecting}, stream exists=${!!this.stream}`);
+        return;
     }
+    this.isConnecting = true;
+
+    console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcUrl}`);
+    
+    try {
+        if (this.stream) {
+            console.log(`[${new Date().toISOString()}] 🛑 Cancelling existing stream`);
+            this.stream.cancel();
+            this.stream = null;
+        }
+
+        const request = {
+            transactions: {
+                account_include: Array.from(this.monitoredWallets),
+                vote: false,
+                failed: false,
+            }
+        };
+
+        console.log(`[${new Date().toISOString()}] 📤 Sending gRPC subscription request for ${this.monitoredWallets.size} wallets`);
+
+        this.stream = await this.client.subscribe(request);
+
+        this.stream.on('data', (update) => {
+            console.log(`[${new Date().toISOString()}] 📥 Received gRPC data`);
+            this.handleUpdate(update);
+        });
+        this.stream.on('error', (error) => {
+            console.error(`[${new Date().toISOString()}] ❌ gRPC stream error: ${error.code} ${error.message}`);
+            this.handleError(error);
+        });
+        this.stream.on('end', () => {
+            console.log(`[${new Date().toISOString()}] 🔌 gRPC stream ended`);
+            this.handleEnd();
+        });
+
+        console.log(`[${new Date().toISOString()}] ✅ Connected to Global Solana gRPC`);
+        this.reconnectAttempts = 0;
+        this.isConnecting = false;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection: ${error.message}`);
+        this.isConnecting = false;
+        this.handleError(error);
+    }
+}
 
     async handleUpdate(update) {
         this.messageCount++;
