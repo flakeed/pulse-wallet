@@ -1,38 +1,36 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 // import { useTokenData, useSolPrice } from '../hooks/usePrices';
 // import { calculateTokenPnL, formatPnL, getPnLColor, formatNumber } from '../utils/pnlCalculator';
-import { formatPnL, getPnLColor, formatNumber } from '../utils/pnlCalculator';
 
 function TokenCard({ token, onOpenChart }) {
   const [showDetails, setShowDetails] = useState(true);
   const [showAllWallets, setShowAllWallets] = useState(false);
-  
   // const { solPrice, loading: solLoading } = useSolPrice();
   // const { tokenData: data, loading, error } = useTokenData(token.mint);
 
   const WALLETS_DISPLAY_LIMIT = 3;
 
-  // const groupPnL = useMemo(() => {
-  //   if (!data || !data.price || !solPrice || loading) {
-  //     return null;
-  //   }
-  //   
-  //   const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
-  //   
-  //   const PnL = {
-  //     ...calculatedPnL,
-  //     realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
-  //     unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
-  //     currentPriceUSD: data.price,
-  //     currentPriceSOL: data.priceInSol || (data.price / solPrice),
-  //     marketCap: data.marketCap,
-  //     holdingPercentage: 100 - calculatedPnL.soldPercentage
-  //   };
-  //   
-  //   return PnL;
-  // }, [data, solPrice, token.wallets, loading, token.symbol]);
+  const groupPnL = useMemo(() => {
+    // if (!data || !data.price || !solPrice || loading) {
+    //   return null;
+    // }
 
-  const basicPnL = token.summary.netSOL;
+    
+    // const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
+    
+    // const PnL = {
+    //   ...calculatedPnL,
+    //   realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
+    //   unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
+    //   currentPriceUSD: data.price,
+    //   currentPriceSOL: data.priceInSol || (data.price / solPrice),
+    //   marketCap: data.marketCap,
+    //   holdingPercentage: 100 - calculatedPnL.soldPercentage
+    // };
+
+    
+    return null;
+  }, []); // [data, solPrice, token.wallets, loading, token.symbol]);
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -50,12 +48,10 @@ function TokenCard({ token, onOpenChart }) {
     window.open(gmgnUrl, '_blank');
   };
 
-  const formatAge = (deploymentTime) => {
-    if (!deploymentTime) return 'Unknown';
+  const formatAge = (ageData) => {
+    if (!ageData || !ageData.ageInHours) return 'Unknown';
     
-    const now = Date.now();
-    const tokenTime = new Date(deploymentTime).getTime();
-    const ageInHours = (now - tokenTime) / (1000 * 60 * 60);
+    const ageInHours = ageData.ageInHours;
     
     if (ageInHours < 1) {
       const minutes = Math.floor(ageInHours * 60);
@@ -93,14 +89,16 @@ function TokenCard({ token, onOpenChart }) {
     setShowAllWallets(false);
   };
 
-  const netColor = getPnLColor(basicPnL);
+  const netColor = groupPnL ? '' : 'text-gray-400'; // getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
   
-  const isNewToken = token.summary.oldestToken ? 
-    (Date.now() - new Date(token.summary.oldestToken).getTime()) < (24 * 60 * 60 * 1000) : 
-    false;
-  
-  const formattedAge = token.summary.oldestToken ? formatAge(token.summary.oldestToken) : 'Unknown';
-  const deploymentTime = token.summary.oldestToken;
+  const isNewToken = false; // data?.age?.isNew || false;
+  const tokenAge = token?.age || null;
+  const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
+  const deploymentTime = tokenAge?.createdAt;
+
+  const displayPnL = 0; // groupPnL?.totalPnLSOL || 0;
+  const displayPrice = 0; // data?.price || 0;
+  const displayMarketCap = 0; // data?.marketCap || 0;
 
   const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
@@ -145,7 +143,10 @@ function TokenCard({ token, onOpenChart }) {
 
           <div className="text-right">
             <div className={`text-sm font-bold ${netColor} flex items-center`}>
-              {formatPnL(basicPnL)}
+              {/* {(loading || solLoading) && (
+                <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
+              )} */}
+              { /* formatPnL(displayPnL) */ 'N/A' }
             </div>
             
             <div className="text-xs text-gray-500">
@@ -190,78 +191,86 @@ function TokenCard({ token, onOpenChart }) {
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mr-3"></div>
               <span className="text-gray-400">Loading data...</span>
             </div>
-          )}
+          )} */}
 
-          {error && !loading && (
+          {/* {error && !loading && (
             <div className="bg-red-900/20 border border-red-700 rounded p-2 mb-3">
               <div className="text-red-400 text-sm">Failed to load data</div>
               <div className="text-red-300 text-xs">{error}</div>
             </div>
           )} */}
 
-          <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
-            <div>
-              <div className="text-gray-400 mb-1">Age</div>
-              <div className="text-white font-medium">
-                {formattedAge}
-                {isNewToken && (
-                  <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
-                )}
-                {deploymentTime && (
+          {/* {data && !loading && ( */}
+            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+              <div>
+                <div className="text-gray-400 mb-1">Price</div>
+                <div className="text-white font-medium">
+                  {'N/A'} {/* ${displayPrice?.toFixed(8) || 'N/A'} */}
                   <div className="text-gray-500 text-xs">
-                    {new Date(deploymentTime).toLocaleDateString()}
+                    {'N/A'} {/* {data.priceInSol?.toFixed(8) || 'N/A'} SOL */}
                   </div>
-                )}
+                </div>
               </div>
-            </div>
-            <div>
-              <div className="text-gray-400 mb-1">Net P&L</div>
-              <div className={`font-medium ${netColor}`}>
-                {formatPnL(basicPnL)}
-                <div className="text-xs text-gray-500">
-                  {token.summary.totalSpentSOL.toFixed(4)} → {token.summary.totalReceivedSOL.toFixed(4)} SOL
+              <div>
+                <div className="text-gray-400 mb-1">Market Cap</div>
+                <div className="text-white font-medium">
+                  {'N/A'} {/* ${formatNumber(displayMarketCap)} */}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Age</div>
+                <div className="text-white font-medium">
+                  {formattedAge}
+                  {isNewToken && (
+                    <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
+                  )}
+                  {deploymentTime && (
+                    <div className="text-gray-500 text-xs">
+                      {new Date(deploymentTime).toLocaleDateString()}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
-          </div>
+          {/* )} */}
 
-          {/* {groupPnL && (
+          {/* {groupPnL && ( */}
             <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
               <div>
                 <div className="text-gray-400 mb-1">Holdings</div>
                 <div className="text-white font-medium">
-                  {formatNumber(groupPnL.currentHoldings, 0)} tokens
+                  {'N/A'} {/* {formatNumber(groupPnL.currentHoldings, 0)} tokens */}
                   <span className="text-gray-500 ml-1">
-                    ({groupPnL.holdingPercentage.toFixed(1)}%)
+                    {/* ({groupPnL.holdingPercentage.toFixed(1)}%) */ 'N/A'}
                   </span>
                 </div>
               </div>
               <div>
                 <div className="text-gray-400 mb-1">Total Spent/Received</div>
                 <div className="text-white font-medium">
-                  {groupPnL.totalSpentSOL.toFixed(4)} / {groupPnL.totalReceivedSOL.toFixed(4)} SOL
+                  {'N/A'} {/* {groupPnL.totalSpentSOL.toFixed(4)} / {groupPnL.totalReceivedSOL.toFixed(4)} SOL */}
                 </div>
               </div>
               <div>
                 <div className="text-gray-400 mb-1">Realized PnL</div>
-                <div className={`font-medium ${getPnLColor(groupPnL.realizedPnLSOL)}`}>
-                  {formatPnL(groupPnL.realizedPnLSOL)}
+                <div className={`font-medium ${'' /* getPnLColor(groupPnL.realizedPnLSOL) */}`}>
+                  {'N/A'} {/* {formatPnL(groupPnL.realizedPnLSOL)} */}
                   <div className="text-xs text-gray-500">
-                    ${formatNumber(groupPnL.realizedPnLUSD)}
+                    {'N/A'} {/* ${formatNumber(groupPnL.realizedPnLUSD)} */}
                   </div>
                 </div>
               </div>
               <div>
                 <div className="text-gray-400 mb-1">Unrealized PnL</div>
-                <div className={`font-medium ${getPnLColor(groupPnL.unrealizedPnLSOL)}`}>
-                  {formatPnL(groupPnL.unrealizedPnLSOL)}
+                <div className={`font-medium ${'' /* getPnLColor(groupPnL.unrealizedPnLSOL) */}`}>
+                  {'N/A'} {/* {formatPnL(groupPnL.unrealizedPnLSOL)} */}
                   <div className="text-xs text-gray-500">
-                    ${formatNumber(groupPnL.unrealizedPnLUSD)}
+                    {'N/A'} {/* ${formatNumber(groupPnL.unrealizedPnLUSD)} */}
                   </div>
                 </div>
               </div>
             </div>
-          )} */}
+          {/* )} */}
 
           <div className="space-y-1">
             <div className="flex items-center justify-between text-gray-400 text-xs mb-2">
@@ -274,53 +283,41 @@ function TokenCard({ token, onOpenChart }) {
             </div>
             
             {walletsToShow.map((wallet, index) => {
+              // const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
               const displayWalletPnL = wallet.pnlSol || 0;
               
               return (
                 <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
-                  <div className="flex items-center space-x-2 min-w-0 flex-1">
-                    <div className="min-w-0">
-                      <div className="flex items-center space-x-1">
-                        <span className="text-gray-200 font-medium truncate max-w-20">
-                          {wallet.name || `${wallet.address.slice(0, 4)}...${wallet.address.slice(-4)}`}
-                        </span>
-                        <button
-                          onClick={() => copyToClipboard(wallet.address)}
-                          className="text-gray-500 hover:text-blue-400 transition-colors"
-                          title="Copy wallet address"
-                        >
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                              d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="text-gray-500 text-xs">
-                        {wallet.txBuys}B · {wallet.txSells}S
-                      </div>
-                    </div>
-                  </div>
-
                   <div className="flex items-center space-x-2">
-                    <div className="text-right">
-                      <div className={`text-xs font-semibold ${getPnLColor(displayWalletPnL)}`}>
-                        {formatPnL(displayWalletPnL)}
-                      </div>
-                      <div className="text-gray-500 text-xs">
-                        {(wallet.solSpent || 0).toFixed(2)}→{(wallet.solReceived || 0).toFixed(2)}
-                      </div>
-                    </div>
-                    
+                    <span className="text-gray-300 font-medium">
+                      {wallet.name || `${wallet.address.slice(0, 4)}...${wallet.address.slice(-4)}`}
+                    </span>
+                    <span className="text-gray-500">
+                      {wallet.txBuys}B · {wallet.txSells}S
+                    </span>
+                    <button
+                      onClick={() => copyToClipboard(wallet.address)}
+                      className="text-gray-500 hover:text-blue-400 transition-colors"
+                      title="Copy wallet address"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
                     <button
                       onClick={() => openGmgnMaker(wallet.address)}
-                      className="text-gray-500 hover:text-blue-400 transition-colors p-1 rounded"
-                      title="Open chart with this wallet"
+                      className="text-gray-500 hover:text-blue-400 transition-colors"
+                      title="View on GMGN"
                     >
                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                           d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                       </svg>
                     </button>
+                  </div>
+                  <div className={`font-medium ${'' /* getPnLColor(displayWalletPnL) */}`}>
+                    {'N/A'} {/* {formatPnL(displayWalletPnL)} */}
                   </div>
                 </div>
               );
