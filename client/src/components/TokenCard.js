@@ -288,7 +288,7 @@ function TokenCard({ token, onOpenChart }) {
             {walletsToShow.map((wallet, index) => {
               // const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
               // const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
-              const displayWalletPnL = wallet.pnlSol || 0;
+              // const displayWalletPnL = wallet.pnlSol || 0;
               
               return (
                 <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
@@ -320,9 +320,9 @@ function TokenCard({ token, onOpenChart }) {
                       </svg>
                     </button>
                   </div>
-                  <div className={`font-medium ${getPnLColor(displayWalletPnL)}`}>
+                  {/* <div className={`font-medium ${getPnLColor(displayWalletPnL)}`}>
                     {formatPnL(displayWalletPnL)}
-                  </div>
+                  </div> */}
                 </div>
               );
             })}
