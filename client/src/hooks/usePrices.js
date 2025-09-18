@@ -63,12 +63,10 @@ const processBatches = async () => {
   const allMints = Array.from(batchQueue);
   batchQueue.clear();
   
-  
   const batches = [];
   for (let i = 0; i < allMints.length; i += MAX_BATCH_SIZE) {
     batches.push(allMints.slice(i, i + MAX_BATCH_SIZE));
   }
-  
   
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
@@ -125,6 +123,7 @@ const processSingleBatch = async (mints) => {
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
     
     try {
+      /*
       const response = await fetch('/api/tokens/batch-data', {
         method: 'POST',
         headers: getAuthHeaders(),
@@ -133,7 +132,6 @@ const processSingleBatch = async (mints) => {
       });
       
       clearTimeout(timeoutId);
-      
       
       if (!response.ok) {
         let errorMessage;
@@ -153,7 +151,6 @@ const processSingleBatch = async (mints) => {
       
       const result = await response.json();
 
-      
       if (result.success && result.data) {
         const now = Date.now();
         
@@ -175,12 +172,83 @@ const processSingleBatch = async (mints) => {
               data: processedTokenData,
               timestamp: now
             });
-            
           }
           
           const pending = pendingRequests.get(mint);
           if (pending) {
             pending.forEach(({ resolve }) => resolve(tokenData));
+            pendingRequests.delete(mint);
+          }
+        });
+      } else {
+        throw new Error(result.error || 'Invalid response format');
+      }
+      */
+      
+      const response = await fetch('/api/tokens/batch-age', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: requestBody,
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.warn(`[usePrices:processSingleBatch] Age endpoint not available, using mock data`);
+        const now = Date.now();
+        
+        validMints.forEach(mint => {
+          const mockAgeData = {
+            age: {
+              createdAt: null,
+              ageInHours: null,
+              isNew: false,
+              formattedAge: 'Unknown'
+            }
+          };
+          
+          globalTokenCache.set(`token-${mint}`, {
+            data: mockAgeData,
+            timestamp: now
+          });
+          
+          const pending = pendingRequests.get(mint);
+          if (pending) {
+            pending.forEach(({ resolve }) => resolve(mockAgeData));
+            pendingRequests.delete(mint);
+          }
+        });
+        return;
+      }
+      
+      const result = await response.json();
+
+      if (result.success && result.data) {
+        const now = Date.now();
+        
+        validMints.forEach(mint => {
+          const ageData = result.data[mint] || null;
+          
+          if (ageData) {
+            const processedAgeData = {
+              age: {
+                createdAt: ageData.age?.createdAt || null,
+                ageInHours: ageData.age?.ageInHours || null,
+                isNew: ageData.age?.isNew || isTokenNew(ageData.age?.ageInHours),
+                formattedAge: formatTokenAge(ageData.age?.ageInHours)
+              }
+            };
+            
+            globalTokenCache.set(`token-${mint}`, {
+              data: processedAgeData,
+              timestamp: now
+            });
+          }
+          
+          const pending = pendingRequests.get(mint);
+          if (pending) {
+            pending.forEach(({ resolve }) => resolve(ageData));
             pendingRequests.delete(mint);
           }
         });
@@ -219,7 +287,6 @@ const queueTokenData = (mint) => {
     
     batchQueue.add(mint);
     
-    
     if (batchTimer) {
       clearTimeout(batchTimer);
     }
@@ -253,7 +320,6 @@ export const useSolPrice = () => {
     setError(null);
 
     try {
-      
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
       
@@ -264,7 +330,6 @@ export const useSolPrice = () => {
         });
         
         clearTimeout(timeoutId);
-        
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -369,6 +434,7 @@ export const useTokenData = (tokenMint) => {
         setError(null);
         
         if (result && result.age) {
+          console.log(`[usePrices] Token age data loaded for ${tokenMint.slice(0, 8)}...`);
         }
       }
       return result;
@@ -415,6 +481,7 @@ export const useTokenData = (tokenMint) => {
   return { tokenData, loading, error, refetch: fetchTokenData };
 };
 
+/*
 export const useTokenPrice = (tokenMint) => {
   const { tokenData, loading, error, refetch } = useTokenData(tokenMint);
   
@@ -436,7 +503,22 @@ export const useTokenPrice = (tokenMint) => {
 
   return { priceData, loading, error, refetch };
 };
+*/
 
+export const useTokenAge = (tokenMint) => {
+  const { tokenData, loading, error, refetch } = useTokenData(tokenMint);
+  
+  const ageData = tokenData ? {
+    ageInHours: tokenData.age?.ageInHours,
+    isNew: tokenData.age?.isNew,
+    formattedAge: tokenData.age?.formattedAge,
+    createdAt: tokenData.age?.createdAt
+  } : null;
+
+  return { ageData, loading, error, refetch };
+};
+
+/*
 export const usePrices = (tokenMint = null) => {
   const { solPrice, loading: solLoading, error: solError } = useSolPrice();
   const { tokenData, loading: tokenLoading, error: tokenError } = useTokenData(tokenMint);
@@ -462,5 +544,24 @@ export const usePrices = (tokenMint = null) => {
     loading: solLoading || tokenLoading,
     error: solError || tokenError,
     ready: solPrice !== null && (!tokenMint || tokenPrice !== undefined)
+  };
+};
+*/
+
+export const usePrices = (tokenMint = null) => {
+  const { solPrice, loading: solLoading, error: solError } = useSolPrice();
+  const { tokenData, loading: tokenLoading, error: tokenError } = useTokenData(tokenMint);
+
+  return {
+    solPrice,
+    tokenAge: tokenData ? {
+      ageInHours: tokenData.age?.ageInHours,
+      isNew: tokenData.age?.isNew,
+      formattedAge: tokenData.age?.formattedAge,
+      deploymentTime: tokenData.age?.createdAt
+    } : undefined,
+    loading: solLoading || tokenLoading,
+    error: solError || tokenError,
+    ready: solPrice !== null && (!tokenMint || tokenData !== undefined)
   };
 };
