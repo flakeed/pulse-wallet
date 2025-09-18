@@ -18,7 +18,7 @@ class SolanaGrpcService {
         this.reconnectAttempts = 0;
         this.messageCount = 0;
         this.activeGroupId = null;
-        this.monitoredWallets = new Set();
+        this.monitoredWallets = new Map();
         this.processedTransactions = new Set();
         this.recentlyProcessed = new Set();
         this.solPriceCache = {
@@ -28,44 +28,45 @@ class SolanaGrpcService {
         };
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 50;
-        this.batchTimeout = 200;
+        this.batchSize = 100;
+        this.batchTimeout = 100;
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
         this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
         this.setupCacheCleanup();
         console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
+        console.log(`[${new Date().toISOString()}] 🚀 Starting in FULL_STREAM mode - listening to all Solana transactions`);
     }
 
-setupCacheCleanup() {
-    setInterval(() => {
-        const now = Date.now();
-        
-        if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
-            if (this.processedTransactions.size > 50000) {
-                const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
-                toDelete.forEach(sig => this.processedTransactions.delete(sig));
-                console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
+    setupCacheCleanup() {
+        setInterval(() => {
+            const now = Date.now();
+            
+            if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
+                if (this.processedTransactions.size > 100000) {
+                    const toDelete = Array.from(this.processedTransactions).slice(0, 50000);
+                    toDelete.forEach(sig => this.processedTransactions.delete(sig));
+                    console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
+                }
+                this.lastProcessedCleanup = now;
             }
-            this.lastProcessedCleanup = now;
-        }
-        
-        if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
-            if (this.recentlyProcessed.size > 5000) {
-                const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
-                toDelete.forEach(key => this.recentlyProcessed.delete(key));
-                console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
+            
+            if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
+                if (this.recentlyProcessed.size > 10000) {
+                    const toDelete = Array.from(this.recentlyProcessed).slice(0, 5000);
+                    toDelete.forEach(key => this.recentlyProcessed.delete(key));
+                    console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
+                }
+                this.lastRecentlyProcessedCleanup = now;
             }
-            this.lastRecentlyProcessedCleanup = now;
-        }
-        
-        if (now % (6 * 60 * 60 * 1000) < 300000) { 
-            console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
-            console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
-        }
-    }, 300000); 
-}
+            
+            if (now % (6 * 60 * 60 * 1000) < 300000) { 
+                console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
+                console.log(`[${new Date().toISOString()}] 📊 Wallet cache: ${this.monitoredWallets.size} wallets loaded`);
+            }
+        }, 300000); 
+    }
 
     async fetchSolPrice() {
         const now = Date.now();
@@ -122,26 +123,58 @@ setupCacheCleanup() {
 
     async start(groupId = null) {
         if (this.isStarted && this.activeGroupId === groupId) {
-            console.log(`[${new Date().toISOString()}] [INFO] gRPC service already started for group ${groupId || 'all'}`);
+            console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM gRPC service already started for group ${groupId || 'all'}`);
             return;
         }
-        console.log(`[${new Date().toISOString()}] [INFO] Starting gRPC service for group ${groupId || 'all'}`);
+        
+        console.log(`[${new Date().toISOString()}] [INFO] Starting FULL_STREAM gRPC service for group ${groupId || 'all'}`);
         this.isStarted = true;
         this.activeGroupId = groupId;
+        
+        await this.loadWalletsForGroup(groupId);
+        
         try {
             await this.connect();
-            await this.subscribeToTransactions();
+            await this.subscribeToAllTransactions();
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Failed to start gRPC service: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] Failed to start FULL_STREAM gRPC service: ${error.message}`);
             this.isStarted = false;
             throw error;
         }
+    }
+
+    async loadWalletsForGroup(groupId) {
+        console.log(`[${new Date().toISOString()}] [INFO] Loading wallets for group ${groupId || 'all'}`);
+        
+        const wallets = await this.db.getActiveWallets(groupId);
+        
+        const pipeline = redis.pipeline();
+        this.monitoredWallets.clear();
+        
+        if (this.monitoredWallets.size > 0) {
+            const oldAddresses = Array.from(this.monitoredWallets.keys());
+            oldAddresses.forEach(address => pipeline.del(`wallet:${address}`));
+            await pipeline.exec();
+        }
+        
+        for (const wallet of wallets) {
+            this.monitoredWallets.set(wallet.address, wallet);
+            
+            try {
+                await redis.setex(`wallet:${wallet.address}`, 300, JSON.stringify(wallet));
+            } catch (error) {
+                console.error(`[${new Date().toISOString()}] [WARN] Failed to cache wallet ${wallet.address}:`, error.message);
+            }
+        }
+        
+        console.log(`[${new Date().toISOString()}] [INFO] Loaded ${this.monitoredWallets.size} wallets for group ${groupId || 'all'}`);
     }
 
     async connect() {
         if (this.isConnecting || this.client) return;
         this.isConnecting = true;
         console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC endpoint: ${this.grpcEndpoint}`);
+        
         try {
             this.client = new Client(this.grpcEndpoint, undefined, {
                 'grpc.keepalive_time_ms': 30000,
@@ -150,8 +183,10 @@ setupCacheCleanup() {
                 'grpc.http2.max_pings_without_data': 0,
                 'grpc.http2.min_time_between_pings_ms': 10000,
                 'grpc.http2.min_ping_interval_without_data_ms': 300000,
-                'grpc.max_receive_message_length': 64 * 1024 * 1024,
-                'grpc.max_send_message_length': 64 * 1024 * 1024
+                'grpc.max_receive_message_length': 128 * 1024 * 1024,
+                'grpc.max_send_message_length': 128 * 1024 * 1024,
+                'grpc.initial_reconnect_backoff_ms': 1000,
+                'grpc.max_reconnect_backoff_ms': 30000
             });
             this.reconnectAttempts = 0;
             console.log(`[${new Date().toISOString()}] [INFO] gRPC client connected successfully`);
@@ -163,17 +198,8 @@ setupCacheCleanup() {
         }
     }
 
-    async subscribeToTransactions() {
-        console.log(`[${new Date().toISOString()}] [INFO] Fetching active wallets for group ${this.activeGroupId || 'all'}`);
-        const wallets = await this.db.getActiveWallets(this.activeGroupId);
-        this.monitoredWallets.clear();
-        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-        console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets`);
-
-        if (this.monitoredWallets.size === 0) {
-            console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
-            return;
-        }
+    async subscribeToAllTransactions() {
+        console.log(`[${new Date().toISOString()}] [INFO] Subscribing to ALL Solana transactions (FULL_STREAM mode)`);
 
         if (this.stream) {
             console.log(`[${new Date().toISOString()}] [INFO] Ending existing stream before new subscription`);
@@ -187,8 +213,8 @@ setupCacheCleanup() {
                 client: {
                     vote: false,
                     failed: false,
-                    accountInclude: Array.from(this.monitoredWallets),
-                    accountExclude: [],
+                    accountInclude: [],
+                    accountExclude: [], 
                     accountRequired: []
                 }
             },
@@ -197,37 +223,46 @@ setupCacheCleanup() {
             blocks: {},
             blocksMeta: {},
             commitment: CommitmentLevel.CONFIRMED,
-            accountsDataSlice: []
+            accountsDataSlice: [],
+            ping: {
+                inactivityThreshold: 60000
+            }
         };
 
         try {
-            console.log(`[${new Date().toISOString()}] [INFO] Creating gRPC stream`);
+            console.log(`[${new Date().toISOString()}] [INFO] Creating FULL_STREAM gRPC stream`);
             this.stream = await this.client.subscribe();
+            
             this.stream.on('data', data => {
                 this.messageCount++;
+                if (this.messageCount % 1000 === 0) {
+                    console.log(`[${new Date().toISOString()}] 📡 Received ${this.messageCount} messages (FULL_STREAM)`);
+                }
                 this.handleGrpcMessageBatched(data);
             });
+            
             this.stream.on('error', error => {
-                console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error: ${error.message}`);
+                console.error(`[${new Date().toISOString()}] [ERROR] FULL_STREAM gRPC error: ${error.message}`);
                 this.handleReconnect();
             });
+            
             this.stream.on('end', () => {
-                console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended`);
+                console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM gRPC stream ended`);
                 if (this.isStarted) setTimeout(() => this.handleReconnect(), 2000);
             });
 
-            console.log(`[${new Date().toISOString()}] [INFO] Sending subscription request`);
+            console.log(`[${new Date().toISOString()}] [INFO] Sending FULL_STREAM subscription request`);
             await new Promise((resolve, reject) => this.stream.write(request, err => {
                 if (err) {
-                    console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed: ${err.message}`);
+                    console.error(`[${new Date().toISOString()}] [ERROR] FULL_STREAM subscription failed: ${err.message}`);
                     reject(err);
                 } else {
-                    console.log(`[${new Date().toISOString()}] [INFO] Subscription request sent successfully`);
+                    console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM subscription request sent successfully`);
                     resolve();
                 }
             }));
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error in subscribeToTransactions: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] Error in FULL_STREAM subscribeToAllTransactions: ${error.message}`);
             throw error;
         }
     }
@@ -238,6 +273,10 @@ setupCacheCleanup() {
 
             const signature = this.extractSignature(data.transaction);
             if (!signature) return;
+
+            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(signature)) {
+                return;
+            }
 
             this.transactionBatch.set(signature, data);
 
@@ -253,7 +292,7 @@ setupCacheCleanup() {
                 this.processBatch();
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error handling gRPC message: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] Error handling FULL_STREAM message: ${error.message}`);
         }
     }
 
@@ -264,7 +303,7 @@ setupCacheCleanup() {
         this.transactionBatch.clear();
         this.batchTimer = null;
 
-        console.log(`[${new Date().toISOString()}] [INFO] Processing batch of ${batch.size} transactions`);
+        console.log(`[${new Date().toISOString()}] [INFO] Processing FULL_STREAM batch of ${batch.size} transactions`);
 
         const promises = Array.from(batch.entries()).map(([signature, data]) =>
             this.processTransaction(data.transaction).catch(error => {
@@ -276,7 +315,9 @@ setupCacheCleanup() {
         const results = await Promise.allSettled(promises);
         const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
 
-        console.log(`[${new Date().toISOString()}] [INFO] Batch processed: ${successful}/${batch.size} successful`);
+        if (successful > 0) {
+            console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM batch processed: ${successful}/${batch.size} total, ${successful} relevant for monitored wallets`);
+        }
     }
 
     async processTransaction(transactionData) {
@@ -309,42 +350,33 @@ setupCacheCleanup() {
             this.processedTransactions.add(signature);
             this.recentlyProcessed.add(processedKey);
 
-            const existingTx = await this.db.pool.query(
-                'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
-                [signature]
-            );
-            if (existingTx.rows.length > 0) {
-                return null;
-            }
-
             let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
             if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
             if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
 
             const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
-            const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
-            if (!involvedWallet) return null;
-
-            const walletCacheKey = `wallet:${involvedWallet}`;
-            let wallet = null;
-
-            try {
-                const cachedWallet = await redis.get(walletCacheKey);
-                if (cachedWallet) {
-                    wallet = JSON.parse(cachedWallet);
-                } else {
-                    wallet = await this.db.getWalletByAddress(involvedWallet);
-                    if (wallet) {
-                        await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
-                    }
+            
+            let involvedWallet = null;
+            for (const [walletAddress, walletData] of this.monitoredWallets) {
+                if (stringAccountKeys.includes(walletAddress)) {
+                    involvedWallet = walletData;
+                    break;
                 }
-            } catch (error) {
-                wallet = await this.db.getWalletByAddress(involvedWallet);
+            }
+            
+            if (!involvedWallet) {
+                return null;
             }
 
-            if (!wallet) return null;
+            if (this.activeGroupId && involvedWallet.group_id !== this.activeGroupId) {
+                return null;
+            }
 
-            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+            const existingTx = await this.db.pool.query(
+                'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
+                [signature]
+            );
+            if (existingTx.rows.length > 0) {
                 return null;
             }
 
@@ -355,12 +387,12 @@ setupCacheCleanup() {
                 transaction,
                 meta,
                 blockTime,
-                wallet,
+                wallet: involvedWallet,
                 accountKeys: stringAccountKeys
             });
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] Error processing FULL_STREAM transaction: ${error.message}`);
             return null;
         }
     }
@@ -454,14 +486,14 @@ setupCacheCleanup() {
                 }
                 await pipeline.exec();
 
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType})`);
+                console.log(`[${new Date().toISOString()}] ✅ FULL_STREAM: Processed ${wallet.address.slice(0,8)}... ${signature.slice(0,8)}... (${transactionType})`);
                 return savedTransaction;
             }
 
             return null;
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] ❌ Error processing FULL_STREAM transaction: ${error.message}`);
             return null;
         }
     }
@@ -797,76 +829,57 @@ setupCacheCleanup() {
         }
     }
 
-    async subscribeToWalletsBatch(walletAddresses, batchSize = 1000) {
-        const startTime = Date.now();
-        let successful = 0;
-        let failed = 0;
-        const errors = [];
+    async switchGroup(groupId) {
+        console.log(`[${new Date().toISOString()}] [INFO] Switching to group ${groupId || 'all'} in FULL_STREAM mode`);
 
-        for (let i = 0; i < walletAddresses.length; i += batchSize) {
-            const batch = walletAddresses.slice(i, i + batchSize);
+        try {
+            this.activeGroupId = groupId;
+            
+            await this.loadWalletsForGroup(groupId);
+            
+            console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM switched to group ${groupId || 'all'}: ${this.monitoredWallets.size} wallets loaded`);
+            
+            return {
+                success: true,
+                activeGroupId: this.activeGroupId,
+                monitoredWallets: this.monitoredWallets.size,
+                mode: 'FULL_STREAM'
+            };
 
-            try {
-                batch.forEach(address => {
-                    if (!this.monitoredWallets.has(address)) {
-                        this.monitoredWallets.add(address);
-                        successful++;
-                    }
-                });
-
-                if (batch.length >= batchSize && i + batchSize < walletAddresses.length) {
-                    await new Promise(resolve => setTimeout(resolve, 10));
-                }
-
-            } catch (error) {
-                failed += batch.length;
-                errors.push({
-                    batch: i / batchSize + 1,
-                    error: error.message,
-                    addresses: batch.length
-                });
-            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Error switching group in FULL_STREAM: ${error.message}`);
+            throw error;
         }
-
-        const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch subscription completed in ${duration}ms: +${successful} wallets, total: ${this.monitoredWallets.size}`);
-
-        return { successful, failed, errors, totalMonitored: this.monitoredWallets.size };
-    }
-
-    async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 1000) {
-        const startTime = Date.now();
-        let successful = 0;
-
-        for (let i = 0; i < walletAddresses.length; i += batchSize) {
-            const batch = walletAddresses.slice(i, i + batchSize);
-
-            batch.forEach(address => {
-                if (this.monitoredWallets.has(address)) {
-                    this.monitoredWallets.delete(address);
-                    successful++;
-                }
-            });
-        }
-
-        const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch unsubscription completed in ${duration}ms: -${successful} wallets, total: ${this.monitoredWallets.size}`);
-
-        return { successful, failed: 0, errors: [], totalMonitored: this.monitoredWallets.size };
     }
 
     async subscribeToWallet(walletAddress) {
-        if (!this.monitoredWallets.has(walletAddress)) {
-            this.monitoredWallets.add(walletAddress);
-            console.log(`[${new Date().toISOString()}] [INFO] Added wallet ${walletAddress} to monitoring, total: ${this.monitoredWallets.size}`);
+        try {
+            const wallet = await this.db.getWalletByAddress(walletAddress);
+            if (!wallet) {
+                return { success: false, error: 'Wallet not found' };
+            }
+
+            this.monitoredWallets.set(walletAddress, wallet);
+            await redis.setex(`wallet:${walletAddress}`, 300, JSON.stringify(wallet));
+            
+            console.log(`[${new Date().toISOString()}] [INFO] Added wallet ${walletAddress} to FULL_STREAM monitoring, total: ${this.monitoredWallets.size}`);
+            
+            return { 
+                success: true, 
+                totalMonitored: this.monitoredWallets.size,
+                mode: 'FULL_STREAM'
+            };
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Error subscribing to wallet: ${error.message}`);
+            return { success: false, error: error.message };
         }
-        return { success: true, totalMonitored: this.monitoredWallets.size };
     }
 
     async unsubscribeFromWallet(walletAddress) {
         if (this.monitoredWallets.has(walletAddress)) {
             this.monitoredWallets.delete(walletAddress);
-            console.log(`[${new Date().toISOString()}] [INFO] Removed wallet ${walletAddress} from monitoring, total: ${this.monitoredWallets.size}`);
+            await redis.del(`wallet:${walletAddress}`);
+            console.log(`[${new Date().toISOString()}] [INFO] Removed wallet ${walletAddress} from FULL_STREAM monitoring, total: ${this.monitoredWallets.size}`);
         }
         return { success: true, totalMonitored: this.monitoredWallets.size };
     }
@@ -911,48 +924,15 @@ setupCacheCleanup() {
         }
     }
 
-    async switchGroup(groupId) {
-        console.log(`[${new Date().toISOString()}] [INFO] Switching to group ${groupId || 'all'}`);
-
-        try {
-            this.activeGroupId = groupId;
-
-            this.monitoredWallets.clear();
-
-            const wallets = await this.db.getActiveWallets(groupId);
-
-            const addresses = wallets.map(w => w.address);
-            if (addresses.length > 0) {
-                await this.subscribeToWalletsBatch(addresses);
-            }
-
-            console.log(`[${new Date().toISOString()}] [INFO] Switched to group ${groupId || 'all'}: ${this.monitoredWallets.size} wallets`);
-
-            if (this.isStarted) {
-                await this.subscribeToTransactions();
-            }
-
-            return {
-                success: true,
-                activeGroupId: this.activeGroupId,
-                monitoredWallets: this.monitoredWallets.size
-            };
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error switching group: ${error.message}`);
-            throw error;
-        }
-    }
-
     async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached, stopping service`);
+            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached, stopping FULL_STREAM service`);
             this.isStarted = false;
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting FULL_STREAM gRPC (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         if (this.stream) {
             try {
@@ -983,11 +963,11 @@ setupCacheCleanup() {
         try {
             this.isConnecting = false;
             await this.connect();
-            await this.subscribeToTransactions();
-            console.log(`[${new Date().toISOString()}] [INFO] Reconnection successful`);
+            await this.subscribeToAllTransactions();
+            console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM reconnection successful`);
             this.reconnectAttempts = 0;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Reconnect failed: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] FULL_STREAM reconnect failed: ${error.message}`);
             this.reconnectInterval = Math.min(this.reconnectInterval * 1.5, 30000);
             await this.handleReconnect();
         }
@@ -1002,7 +982,7 @@ setupCacheCleanup() {
             messageCount: this.messageCount,
             reconnectAttempts: this.reconnectAttempts,
             grpcEndpoint: this.grpcEndpoint,
-            mode: 'optimized_grpc',
+            mode: 'FULL_STREAM',
             performance: {
                 processedTransactions: this.processedTransactions.size,
                 recentlyProcessed: this.recentlyProcessed.size,
@@ -1011,14 +991,19 @@ setupCacheCleanup() {
                 solPriceCached: this.solPriceCache.lastUpdated > 0,
                 cacheStats: {
                     solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
-                    solPrice: this.solPriceCache.price
+                    solPrice: this.solPriceCache.price,
+                    walletCacheSize: this.monitoredWallets.size
+                },
+                fullStreamStats: {
+                    totalMessagesProcessed: this.messageCount,
+                    relevantTransactions: this.messageCount * 0.001
                 }
             }
         };
     }
 
     async stop() {
-        console.log(`[${new Date().toISOString()}] [INFO] Stopping optimized gRPC service`);
+        console.log(`[${new Date().toISOString()}] [INFO] Stopping FULL_STREAM gRPC service`);
 
         this.isStarted = false;
 
@@ -1028,7 +1013,7 @@ setupCacheCleanup() {
         }
 
         if (this.transactionBatch.size > 0) {
-            console.log(`[${new Date().toISOString()}] [INFO] Processing final batch of ${this.transactionBatch.size} transactions`);
+            console.log(`[${new Date().toISOString()}] [INFO] Processing final FULL_STREAM batch of ${this.transactionBatch.size} transactions`);
             await this.processBatch();
         }
 
@@ -1051,13 +1036,11 @@ setupCacheCleanup() {
             this.client = null;
         }
 
-        this.monitoredWallets.clear();
-
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service stopped`);
+        console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM gRPC service stopped`);
     }
 
     async shutdown() {
-        console.log(`[${new Date().toISOString()}] [INFO] Shutting down optimized gRPC service`);
+        console.log(`[${new Date().toISOString()}] [INFO] Shutting down FULL_STREAM gRPC service`);
 
         await this.stop();
 
@@ -1071,10 +1054,11 @@ setupCacheCleanup() {
             console.error(`[${new Date().toISOString()}] [ERROR] Error closing DB: ${error.message}`);
         }
 
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service shutdown complete`);
+        console.log(`[${new Date().toISOString()}] [INFO] FULL_STREAM gRPC service shutdown complete`);
     }
 
     getPerformanceStats() {
+        const now = Date.now();
         return {
             monitoredWallets: this.monitoredWallets.size,
             messagesProcessed: this.messageCount,
@@ -1084,75 +1068,54 @@ setupCacheCleanup() {
             solPriceCache: {
                 price: this.solPriceCache.price,
                 lastUpdated: this.solPriceCache.lastUpdated,
-                ageMs: Date.now() - this.solPriceCache.lastUpdated
+                ageMs: now - this.solPriceCache.lastUpdated
+            },
+            fullStream: {
+                totalMessages: this.messageCount,
+                estimatedTps: Math.round(this.messageCount / ((now - this.solPriceCache.lastUpdated) / 1000) * 100) / 100,
+                walletHitRate: this.monitoredWallets.size > 0 ? (this.messageCount * 0.001 / this.monitoredWallets.size) : 0
             },
             reconnectAttempts: this.reconnectAttempts,
             isHealthy: this.isStarted && this.client !== null && this.stream !== null
         };
     }
 
-   forceCleanupCaches() {
-    const before = {
-        processedTransactions: this.processedTransactions.size,
-        recentlyProcessed: this.recentlyProcessed.size
-    };
-    
-    if (this.processedTransactions.size > 1000) {
-        const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
-        toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
-    } else {
-        this.processedTransactions.clear();
+    forceCleanupCaches() {
+        const before = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size
+        };
+        
+        if (this.processedTransactions.size > 1000) {
+            const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
+            toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
+        } else {
+            this.processedTransactions.clear();
+        }
+        
+        if (this.recentlyProcessed.size > 1000) {
+            const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
+            toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
+        } else {
+            this.recentlyProcessed.clear();
+        }
+        
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
+        
+        const after = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size
+        };
+        
+        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
+        return { before, after };
     }
-    
-    if (this.recentlyProcessed.size > 1000) {
-        const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
-        toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
-    } else {
-        this.recentlyProcessed.clear();
+
+    clearCaches() {
+        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
+        return this.forceCleanupCaches();
     }
-    
-    this.lastProcessedCleanup = Date.now();
-    this.lastRecentlyProcessedCleanup = Date.now();
-    
-    const after = {
-        processedTransactions: this.processedTransactions.size,
-        recentlyProcessed: this.recentlyProcessed.size
-    };
-    
-    console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
-    return { before, after };
-}
-
-clearCaches() {
-    console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
-    return this.forceCleanupCaches();
-}
-
-getPerformanceStats() {
-    const now = Date.now();
-    return {
-        monitoredWallets: this.monitoredWallets.size,
-        messagesProcessed: this.messageCount,
-        processedTransactionsCache: this.processedTransactions.size,
-        recentlyProcessedCache: this.recentlyProcessed.size,
-        currentBatchSize: this.transactionBatch.size,
-        solPriceCache: {
-            price: this.solPriceCache.price,
-            lastUpdated: this.solPriceCache.lastUpdated,
-            ageMs: now - this.solPriceCache.lastUpdated
-        },
-        cacheCleanup: {
-            lastProcessedCleanup: this.lastProcessedCleanup,
-            lastRecentlyProcessedCleanup: this.lastRecentlyProcessedCleanup,
-            timeSinceProcessedCleanup: now - this.lastProcessedCleanup,
-            timeSinceRecentlyProcessedCleanup: now - this.lastRecentlyProcessedCleanup,
-            nextProcessedCleanupIn: Math.max(0, this.PROCESSED_CLEANUP_INTERVAL - (now - this.lastProcessedCleanup)),
-            nextRecentlyProcessedCleanupIn: Math.max(0, this.RECENTLY_PROCESSED_CLEANUP_INTERVAL - (now - this.lastRecentlyProcessedCleanup))
-        },
-        reconnectAttempts: this.reconnectAttempts,
-        isHealthy: this.isStarted && this.client !== null && this.stream !== null
-    };
-}
 }
 
 module.exports = SolanaGrpcService;
