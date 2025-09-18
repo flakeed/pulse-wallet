@@ -74,90 +74,121 @@ class SolanaGrpcService {
             throw error;
         }
     }
-    async subscribeToTransactions() {
-        try {
-            const wallets = await this.db.getActiveWallets(this.activeGroupId);
-            this.monitoredWallets.clear();
-            wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-           
-            console.log(`[${new Date().toISOString()}] 📊 Monitoring ${this.monitoredWallets.size} wallets${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
-            if (this.stream) {
-                this.stream.end();
-            }
-            const request = {
-                accounts: {},
-                slots: {},
-                transactions: {
-                    client: {
-                        vote: false,
-                        failed: false,
-                        accountInclude: [],
-                        accountExclude: [],
-                        accountRequired: []
-                    }
-                },
-                transactionsStatus: {},
-                entry: {},
-                blocks: {},
-                blocksMeta: {},
-                commitment: CommitmentLevel.CONFIRMED,
-                accountsDataSlice: [],
-                ping: undefined
-            };
-            console.log(`[${new Date().toISOString()}] 🔗 Creating gRPC stream...`);
-            this.stream = await this.client.subscribe();
-           
-            this.stream.on('data', (data) => {
-                this.messageCount++;
-                if (this.messageCount <= 3) {
-                    console.log(`[${new Date().toISOString()}] 📨 Received gRPC data #${this.messageCount}:`, Object.keys(data || {}));
-                    if (data.transaction) {
-                        console.log(`[${new Date().toISOString()}] 🔍 Transaction data structure:`, Object.keys(data.transaction || {}));
-                    }
-                }
-                this.handleGrpcMessage(data);
-            });
-            this.stream.on('error', (error) => {
-                console.error(`[${new Date().toISOString()}] ❌ gRPC stream error:`, error.message);
-                if (error.message.includes('serialization failure')) {
-                    console.error(`[${new Date().toISOString()}] 🛑 Serialization error - stopping service`);
-                    this.isStarted = false;
-                    return;
-                }
-                this.handleReconnect();
-            });
-            this.stream.on('end', () => {
-                console.log(`[${new Date().toISOString()}] 🔌 gRPC stream ended`);
-                if (this.isStarted) {
-                    setTimeout(() => this.handleReconnect(), 2000);
-                }
-            });
-            console.log(`[${new Date().toISOString()}] 📤 Sending subscription request with official format...`);
-            console.log(`[${new Date().toISOString()}] 🔍 Request:`, JSON.stringify(request, null, 2));
-            await new Promise((resolve, reject) => {
-                this.stream.write(request, (err) => {
-                    if (err === null || err === undefined) {
-                        console.log(`[${new Date().toISOString()}] ✅ Subscription request sent successfully`);
-                        resolve();
-                    } else {
-                        console.error(`[${new Date().toISOString()}] ❌ Subscription request failed:`, err);
-                        reject(err);
-                    }
-                });
-            });
-            console.log(`[${new Date().toISOString()}] ⏳ Waiting for transaction data...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            if (this.messageCount > 0) {
-                console.log(`[${new Date().toISOString()}] 🎉 SUCCESS: Received ${this.messageCount} messages from gRPC!`);
-            } else {
-                console.log(`[${new Date().toISOString()}] ⚠️ No messages received yet, but stream appears stable`);
-            }
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error subscribing to transactions:`, error.message);
-            console.error(`[${new Date().toISOString()}] 📋 Subscribe error details:`, error);
-            throw error;
+
+async subscribeToTransactions() {
+    try {
+        const wallets = await this.db.getActiveWallets(this.activeGroupId);
+        this.monitoredWallets.clear();
+        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+       
+        console.log(`[${new Date().toISOString()}] 📊 Monitoring ${this.monitoredWallets.size} wallets${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
+        
+        if (this.monitoredWallets.size === 0) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ No wallets to monitor! Skipping gRPC subscription.`);
+            return;
         }
+
+        if (this.stream) {
+            this.stream.end();
+        }
+
+        const walletsArray = Array.from(this.monitoredWallets);
+        console.log(`[${new Date().toISOString()}] 📝 Setting up gRPC filter for wallets:`, walletsArray.slice(0, 3).map(w => `${w.slice(0,8)}...`));
+
+        const request = {
+            accounts: {},
+            slots: {},
+            transactions: {
+                client: {
+                    vote: false,
+                    failed: false,
+                    accountInclude: walletsArray, 
+                    accountExclude: [],
+                    accountRequired: []
+                }
+            },
+            transactionsStatus: {},
+            entry: {},
+            blocks: {},
+            blocksMeta: {},
+            commitment: CommitmentLevel.CONFIRMED,
+            accountsDataSlice: [],
+            ping: undefined
+        };
+
+        console.log(`[${new Date().toISOString()}] 🔗 Creating gRPC stream...`);
+        this.stream = await this.client.subscribe();
+       
+        this.stream.on('data', (data) => {
+            this.messageCount++;
+            if (this.messageCount <= 3) {
+                console.log(`[${new Date().toISOString()}] 📨 Received gRPC data #${this.messageCount}:`, Object.keys(data || {}));
+                if (data.transaction) {
+                    console.log(`[${new Date().toISOString()}] 🔍 Transaction data structure:`, Object.keys(data.transaction || {}));
+                }
+            }
+            
+            if (this.messageCount % 1000 === 0) {
+                console.log(`[${new Date().toISOString()}] 📊 gRPC processed ${this.messageCount} messages, monitoring ${this.monitoredWallets.size} wallets`);
+            }
+            
+            this.handleGrpcMessage(data);
+        });
+
+        this.stream.on('error', (error) => {
+            console.error(`[${new Date().toISOString()}] ❌ gRPC stream error:`, error.message);
+            if (error.message.includes('serialization failure')) {
+                console.error(`[${new Date().toISOString()}] 🛑 Serialization error - stopping service`);
+                this.isStarted = false;
+                return;
+            }
+            this.handleReconnect();
+        });
+
+        this.stream.on('end', () => {
+            console.log(`[${new Date().toISOString()}] 🔌 gRPC stream ended`);
+            if (this.isStarted) {
+                setTimeout(() => this.handleReconnect(), 2000);
+            }
+        });
+
+        console.log(`[${new Date().toISOString()}] 📤 Sending subscription request with wallet filter...`);
+        console.log(`[${new Date().toISOString()}] 🔍 Request:`, JSON.stringify({
+            ...request,
+            transactions: {
+                client: {
+                    ...request.transactions.client,
+                    accountInclude: `[${walletsArray.length} wallets: ${walletsArray.slice(0,2).join(', ')}...]`
+                }
+            }
+        }, null, 2));
+
+        await new Promise((resolve, reject) => {
+            this.stream.write(request, (err) => {
+                if (err === null || err === undefined) {
+                    console.log(`[${new Date().toISOString()}] ✅ Subscription request sent successfully with ${walletsArray.length} wallet filters`);
+                    resolve();
+                } else {
+                    console.error(`[${new Date().toISOString()}] ❌ Subscription request failed:`, err);
+                    reject(err);
+                }
+            });
+        });
+
+        console.log(`[${new Date().toISOString()}] ⏳ Waiting for transaction data for ${walletsArray.length} wallets...`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        if (this.messageCount > 0) {
+            console.log(`[${new Date().toISOString()}] 🎉 SUCCESS: Received ${this.messageCount} messages from gRPC!`);
+        } else {
+            console.log(`[${new Date().toISOString()}] ⚠️ No messages received yet, but stream appears stable`);
+        }
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error subscribing to transactions:`, error.message);
+        console.error(`[${new Date().toISOString()}] 📋 Subscribe error details:`, error);
+        throw error;
     }
+}
     async handleGrpcMessage(data) {
         try {
             if (data.transaction) {
@@ -172,7 +203,13 @@ async processTransaction(transactionData) {
         const transaction = transactionData.transaction;
         const meta = transactionData.meta;
         
-        if (!transaction || !meta || meta.err) {
+        if (!transaction || !meta) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no transaction or meta data`);
+            return;
+        }
+        
+        if (meta.err) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: transaction failed with error:`, meta.err);
             return;
         }
         
@@ -184,29 +221,39 @@ async processTransaction(transactionData) {
         
         let accountKeys = [];
         if (transaction.message.accountKeys) {
-            accountKeys = transaction.message.accountKeys.map(key =>
-                Buffer.from(key).toString('base64')
-            );
+            accountKeys = transaction.message.accountKeys.map(key => {
+                if (typeof key === 'string') {
+                    return key;
+                } else if (Buffer.isBuffer(key)) {
+                    try {
+                        const { PublicKey } = require('@solana/web3.js');
+                        return new PublicKey(key).toString();
+                    } catch (e) {
+                        return Buffer.from(key).toString('base64');
+                    }
+                } else {
+                    return key.toString();
+                }
+            });
         }
+        
+        console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... with ${accountKeys.length} accounts`);
         
         let involvedWallet = null;
         for (const walletAddress of this.monitoredWallets) {
-            try {
-                const { PublicKey } = require('@solana/web3.js');
-                const pubkey = new PublicKey(walletAddress);
-                const base64Key = Buffer.from(pubkey.toBytes()).toString('base64');
-                
-                if (accountKeys.includes(base64Key)) {
-                    involvedWallet = walletAddress;
-                    break;
-                }
-            } catch (error) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid wallet address: ${walletAddress}`);
-                continue;
+            if (accountKeys.includes(walletAddress)) {
+                involvedWallet = walletAddress;
+                console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet ${walletAddress.slice(0,8)}... in transaction`);
+                break;
             }
         }
         
         if (!involvedWallet) {
+            if (this.messageCount <= 10) {
+                console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets in transaction ${signature.slice(0, 8)}...`);
+                console.log(`[${new Date().toISOString()}] 📝 Transaction accounts (first 3):`, accountKeys.slice(0, 3).map(k => `${k.slice(0,8)}...`));
+                console.log(`[${new Date().toISOString()}] 📝 Monitored wallets (first 3):`, Array.from(this.monitoredWallets).slice(0, 3).map(k => `${k.slice(0,8)}...`));
+            }
             return;
         }
         
@@ -216,13 +263,9 @@ async processTransaction(transactionData) {
             return;
         }
         
-        console.log(`[${new Date().toISOString()}] 🔍 Transaction check: activeGroupId=${this.activeGroupId}, wallet.group_id=${wallet.group_id}`);
-        
-        if (this.activeGroupId) {
-            if (wallet.group_id !== this.activeGroupId) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping transaction ${signature.slice(0, 8)}... - wallet belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
-                return;
-            }
+        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping transaction ${signature.slice(0, 8)}... - wallet belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
+            return;
         }
         
         let blockTime;
@@ -232,7 +275,7 @@ async processTransaction(transactionData) {
             blockTime = Math.floor(Date.now() / 1000);
         }
         
-        console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
+        console.log(`[${new Date().toISOString()}] 🎯 Processing valid transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
         
         const convertedTransaction = this.convertGrpcToLegacyFormat(transactionData, accountKeys);
         
@@ -246,46 +289,60 @@ async processTransaction(transactionData) {
         
     } catch (error) {
         console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
+        console.error(`[${new Date().toISOString()}] 📋 Error stack:`, error.stack);
     }
 }
-    convertGrpcToLegacyFormat(grpcData, accountKeys) {
-        try {
-            const transaction = grpcData.transaction;
-            const meta = grpcData.meta;
-            const converted = {
-                transaction: {
-                    message: {
-                        accountKeys: accountKeys.map(key => {
-                            try {
-                                const { PublicKey } = require('@solana/web3.js');
-                                return new PublicKey(Buffer.from(key, 'base64'));
-                            } catch (error) {
-                                return key;
-                            }
-                        }),
-                        instructions: transaction.message.instructions || []
-                    },
-                    signatures: transaction.signatures || []
+convertGrpcToLegacyFormat(grpcData, accountKeys) {
+    try {
+        const transaction = grpcData.transaction;
+        const meta = grpcData.meta;
+        
+        const formattedAccountKeys = accountKeys.map(key => {
+            try {
+                if (typeof key === 'string' && key.length >= 32) {
+                    return key;
+                } else if (Buffer.isBuffer(key)) {
+                    const { PublicKey } = require('@solana/web3.js');
+                    return new PublicKey(key).toString();
+                } else {
+                    return key.toString();
+                }
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Error converting account key:`, error.message);
+                return key;
+            }
+        });
+
+        const converted = {
+            transaction: {
+                message: {
+                    accountKeys: formattedAccountKeys,
+                    instructions: transaction.message.instructions || []
                 },
-                meta: {
-                    err: meta.err,
-                    fee: meta.fee || 0,
-                    preBalances: meta.preBalances || [],
-                    postBalances: meta.postBalances || [],
-                    preTokenBalances: this.convertTokenBalances(meta.preTokenBalances || []),
-                    postTokenBalances: this.convertTokenBalances(meta.postTokenBalances || []),
-                    logMessages: meta.logMessages || [],
-                    innerInstructions: meta.innerInstructions || []
-                },
-                slot: grpcData.slot,
-                blockTime: grpcData.blockTime ? Number(grpcData.blockTime) : Math.floor(Date.now() / 1000)
-            };
-            return converted;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error converting gRPC format:`, error.message);
-            return null;
-        }
+                signatures: transaction.signatures || []
+            },
+            meta: {
+                err: meta.err,
+                fee: meta.fee || 0,
+                preBalances: meta.preBalances || [],
+                postBalances: meta.postBalances || [],
+                preTokenBalances: this.convertTokenBalances(meta.preTokenBalances || []),
+                postTokenBalances: this.convertTokenBalances(meta.postTokenBalances || []),
+                logMessages: meta.logMessages || [],
+                innerInstructions: meta.innerInstructions || []
+            },
+            slot: grpcData.slot,
+            blockTime: grpcData.blockTime ? Number(grpcData.blockTime) : Math.floor(Date.now() / 1000)
+        };
+        
+        console.log(`[${new Date().toISOString()}] 🔄 Converted transaction with ${formattedAccountKeys.length} accounts, ${converted.meta.preTokenBalances.length} pre-token balances, ${converted.meta.postTokenBalances.length} post-token balances`);
+        
+        return converted;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error converting gRPC format:`, error.message);
+        return null;
     }
+}
     convertTokenBalances(grpcTokenBalances) {
         return grpcTokenBalances.map(balance => ({
             accountIndex: balance.accountIndex || 0,
