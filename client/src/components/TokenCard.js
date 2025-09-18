@@ -15,7 +15,7 @@ function TokenCard({ token, onOpenChart }) {
       return null;
     }
 
-    
+    /*
     const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
     
     const PnL = {
@@ -27,9 +27,14 @@ function TokenCard({ token, onOpenChart }) {
       marketCap: data.marketCap,
       holdingPercentage: 100 - calculatedPnL.soldPercentage
     };
-
+    */
     
-    return PnL;
+    return {
+      currentHoldings: token.wallets.reduce((total, wallet) => {
+        return total + (wallet.tokensBought || 0) - (wallet.tokensSold || 0);
+      }, 0),
+      holdingPercentage: 100 
+    };
   }, [data, solPrice, token.wallets, loading, token.symbol]);
 
   const copyToClipboard = (text) => {
@@ -89,16 +94,19 @@ function TokenCard({ token, onOpenChart }) {
     setShowAllWallets(false);
   };
 
-  const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  // const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  const netColor = 'text-gray-400';
   
   const isNewToken = data?.age?.isNew || false;
   const tokenAge = data?.age || null;
   const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
   const deploymentTime = tokenAge?.createdAt;
 
+  /*
   const displayPnL = groupPnL?.totalPnLSOL || 0;
   const displayPrice = data?.price || 0;
   const displayMarketCap = data?.marketCap || 0;
+  */
 
   const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
@@ -142,21 +150,29 @@ function TokenCard({ token, onOpenChart }) {
           </div>
 
           <div className="text-right">
+            {/* Закомментировано - убираем PnL отображение */}
+            {/* 
             <div className={`text-sm font-bold ${netColor} flex items-center`}>
               {(loading || solLoading) && (
                 <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
               )}
               {formatPnL(displayPnL)}
             </div>
+            */}
             
+            {/* Вернули статистику транзакций */}
             <div className="text-xs text-gray-500">
               {token.summary.uniqueWallets}W · {token.summary.totalBuys}B · {token.summary.totalSells}S
             </div>
+            
+            {/* Закомментировано - убираем цену и market cap */}
+            {/* 
             {!loading && displayPrice > 0 && (
               <div className="text-xs text-blue-400">
                 ${formatNumber(displayPrice, 8)} · MC: ${formatNumber(displayMarketCap)}
               </div>
             )}
+            */}
           </div>
         </div>
 
@@ -201,41 +217,49 @@ function TokenCard({ token, onOpenChart }) {
           )}
 
           {data && !loading && (
-            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
-              <div>
-                <div className="text-gray-400 mb-1">Price</div>
-                <div className="text-white font-medium">
-                  ${displayPrice?.toFixed(8) || 'N/A'}
-                  <div className="text-gray-500 text-xs">
-                    {data.priceInSol?.toFixed(8) || 'N/A'} SOL
+            <>
+              {/* Оставляем только данные о возрасте токена */}
+              <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+                <div>
+                  <div className="text-gray-400 mb-1">Age</div>
+                  <div className="text-white font-medium">
+                    {formattedAge}
+                    {isNewToken && (
+                      <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
+                    )}
+                    {deploymentTime && (
+                      <div className="text-gray-500 text-xs">
+                        {new Date(deploymentTime).toLocaleDateString()}
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Market Cap</div>
-                <div className="text-white font-medium">
-                  ${formatNumber(displayMarketCap)}
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Age</div>
-                <div className="text-white font-medium">
-                  {formattedAge}
-                  {isNewToken && (
-                    <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
-                  )}
-                  {deploymentTime && (
+                
+                {/* Закомментировано - убираем цену и market cap */}
+                {/* 
+                <div>
+                  <div className="text-gray-400 mb-1">Price</div>
+                  <div className="text-white font-medium">
+                    ${displayPrice?.toFixed(8) || 'N/A'}
                     <div className="text-gray-500 text-xs">
-                      {new Date(deploymentTime).toLocaleDateString()}
+                      {data.priceInSol?.toFixed(8) || 'N/A'} SOL
                     </div>
-                  )}
+                  </div>
                 </div>
+                <div>
+                  <div className="text-gray-400 mb-1">Market Cap</div>
+                  <div className="text-white font-medium">
+                    ${formatNumber(displayMarketCap)}
+                  </div>
+                </div>
+                */}
               </div>
-            </div>
+            </>
           )}
 
           {groupPnL && (
             <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+              {/* Оставляем только холдингс */}
               <div>
                 <div className="text-gray-400 mb-1">Holdings</div>
                 <div className="text-white font-medium">
@@ -245,6 +269,9 @@ function TokenCard({ token, onOpenChart }) {
                   </span>
                 </div>
               </div>
+              
+              {/* Закомментировано - убираем остальные PnL данные */}
+              {/* 
               <div>
                 <div className="text-gray-400 mb-1">Total Spent/Received</div>
                 <div className="text-white font-medium">
@@ -269,9 +296,11 @@ function TokenCard({ token, onOpenChart }) {
                   </div>
                 </div>
               </div>
+              */}
             </div>
           )}
 
+          {/* Вернули блок с кошельками */}
           <div className="space-y-1">
             <div className="flex items-center justify-between text-gray-400 text-xs mb-2">
               <span>Top Wallets</span>
@@ -283,8 +312,7 @@ function TokenCard({ token, onOpenChart }) {
             </div>
             
             {walletsToShow.map((wallet, index) => {
-              const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
-              const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
+              const displayWalletPnL = wallet.pnlSol || 0;
               
               return (
                 <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
