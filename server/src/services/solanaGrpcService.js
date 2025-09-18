@@ -69,61 +69,27 @@ class SolanaGrpcService {
         }
     }
 
-async subscribeToTransactions() {
-    console.log(`[${new Date().toISOString()}] [INFO] Fetching active wallets for group ${this.activeGroupId || 'all'}`);
-    const wallets = await this.db.getActiveWallets(this.activeGroupId);
-    this.monitoredWallets.clear();
-    wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-    console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets`);
+    async subscribeToTransactions() {
+        console.log(`[${new Date().toISOString()}] [INFO] Fetching active wallets for group ${this.activeGroupId || 'all'}`);
+        const wallets = await this.db.getActiveWallets(this.activeGroupId);
+        this.monitoredWallets.clear();
+        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+        console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets`);
 
-    if (this.monitoredWallets.size === 0) {
-        console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
-        return;
-    }
+        if (this.monitoredWallets.size === 0) {
+            console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
+            return;
+        }
 
-    const chunkSize = 1000; 
-    const walletArray = Array.from(this.monitoredWallets);
-    const chunks = [];
-    for (let i = 0; i < walletArray.length; i += chunkSize) {
-        chunks.push(walletArray.slice(i, i + chunkSize));
-    }
-    console.log(`[${new Date().toISOString()}] [INFO] Split ${walletArray.length} wallets into ${chunks.length} chunks`);
-
-    if (this.streams) {
-        this.streams.forEach(stream => stream.end());
-    }
-    if (this.clients) {
-        this.clients.forEach(client => client.close?.());
-    }
-    this.streams = [];
-    this.clients = [];
-
-    for (let idx = 0; idx < chunks.length; idx++) {
-        const client = new Client(this.grpcEndpoint, undefined, {
-            'grpc.keepalive_time_ms': 30000,
-            'grpc.keepalive_timeout_ms': 5000,
-            'grpc.keepalive_permit_without_calls': true,
-            'grpc.http2.max_pings_without_data': 0,
-            'grpc.http2.min_time_between_pings_ms': 10000,
-            'grpc.http2.min_ping_interval_without_data_ms': 300000,
-            'grpc.max_send_message_length': 50 * 1024 * 1024, 
-            'grpc.max_receive_message_length': 50 * 1024 * 1024, 
-        });
-        const stream = await client.subscribe();
-        stream.on('data', data => this.handleGrpcMessage(data));
-        stream.on('error', error => {
-            console.error(`[${new Date().toISOString()}] [ERROR] Stream ${idx} error: ${error.message}`);
-            this.handleReconnect(idx);
-        });
-        stream.on('end', () => {
-            console.log(`[${new Date().toISOString()}] [INFO] Stream ${idx} ended`);
-            if (this.isStarted) setTimeout(() => this.handleReconnect(idx), 2000);
-        });
+        if (this.stream) {
+            console.log(`[${new Date().toISOString()}] [INFO] Ending existing stream before new subscription`);
+            this.stream.end();
+        }
 
         const request = {
             accounts: {},
             slots: {},
-            transactions: { [`chunk${idx}`]: { vote: false, failed: false, accountInclude: chunks[idx], accountExclude: [], accountRequired: [] } },
+            transactions: { client: { vote: false, failed: false, accountInclude: Array.from(this.monitoredWallets), accountExclude: [], accountRequired: [] } },
             transactionsStatus: {},
             entry: {},
             blocks: {},
@@ -132,20 +98,42 @@ async subscribeToTransactions() {
             accountsDataSlice: []
         };
 
-        await new Promise((resolve, reject) => stream.write(request, err => {
-            if (err) {
-                console.error(`[${new Date().toISOString()}] [ERROR] Subscription ${idx} failed: ${err.message}`);
-                reject(err);
-            } else {
-                console.log(`[${new Date().toISOString()}] [INFO] Subscription ${idx} sent`);
-                resolve();
-            }
-        }));
+        try {
+            console.log(`[${new Date().toISOString()}] [INFO] Creating gRPC stream`);
+            this.stream = await this.client.subscribe();
+            this.stream.on('data', data => {
+                this.messageCount++;
+                this.handleGrpcMessage(data);
+            });
+            this.stream.on('error', error => {
+                console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error: ${error.message}`, error.stack);
+                if (error.message.includes('serialization failure')) {
+                    console.error(`[${new Date().toISOString()}] [CRITICAL] Serialization failure, stopping service`);
+                    this.isStarted = false;
+                    return;
+                }
+                this.handleReconnect();
+            });
+            this.stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended`);
+                if (this.isStarted) setTimeout(() => this.handleReconnect(), 2000);
+            });
 
-        this.clients.push(client);
-        this.streams.push(stream);
+            console.log(`[${new Date().toISOString()}] [INFO] Sending subscription request`);
+            await new Promise((resolve, reject) => this.stream.write(request, err => {
+                if (err) {
+                    console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed: ${err.message}`, err.stack);
+                    reject(err);
+                } else {
+                    console.log(`[${new Date().toISOString()}] [INFO] Subscription request sent successfully`);
+                    resolve();
+                }
+            }));
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Error in subscribeToTransactions: ${error.message}`, error.stack);
+            throw error;
+        }
     }
-}
 
     handleGrpcMessage(data) {
         try {
@@ -425,53 +413,32 @@ extractSignature(transactionData) {
         if (this.isStarted) await this.subscribeToTransactions();
     }
 
-async handleReconnect(streamIdx = null) {
-    if (streamIdx === null) {
-        this.reconnectAttempts++;
+    async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached`);
+            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached, stopping service`);
             this.isStarted = false;
             return;
         }
-        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting all streams (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        await this.subscribeToTransactions();
-        return;
+        this.reconnectAttempts++;
+        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        if (this.stream) this.stream.end();
+        if (this.client) {
+            if (typeof this.client.close === 'function') this.client.close();
+            else if (typeof this.client.destroy === 'function') this.client.destroy();
+            else if (typeof this.client.end === 'function') this.client.end();
+            this.client = null;
+        }
+        await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
+        try {
+            this.isConnecting = false;
+            await this.connect();
+            await this.subscribeToTransactions();
+            console.log(`[${new Date().toISOString()}] [INFO] Reconnection successful`);
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Reconnect failed: ${error.message}`, error.stack);
+            await this.handleReconnect();
+        }
     }
-
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached for stream ${streamIdx}`);
-        this.isStarted = false;
-        return;
-    }
-    this.reconnectAttempts++;
-    console.log(`[${new Date().toISOString()}] [INFO] Reconnecting stream ${streamIdx} (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    if (this.streams[streamIdx]) this.streams[streamIdx].end();
-    if (this.clients[streamIdx]) this.clients[streamIdx].close?.();
-    await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
-
-    try {
-        const client = new Client(this.grpcEndpoint, undefined);
-        const stream = await client.subscribe();
-        stream.on('data', data => this.handleGrpcMessage(data));
-        stream.on('error', error => this.handleReconnect(streamIdx));
-        stream.on('end', () => setTimeout(() => this.handleReconnect(streamIdx), 2000));
-
-        const walletArray = Array.from(this.monitoredWallets);
-        const chunk = walletArray.slice(streamIdx * 1000, (streamIdx + 1) * 1000);
-        const request = {
-            transactions: { [`chunk${streamIdx}`]: { vote: false, failed: false, accountInclude: chunk, accountExclude: [], accountRequired: [] } },
-            commitment: CommitmentLevel.CONFIRMED
-        };
-        await new Promise((resolve, reject) => stream.write(request, err => err ? reject(err) : resolve()));
-        this.clients[streamIdx] = client;
-        this.streams[streamIdx] = stream;
-        console.log(`[${new Date().toISOString()}] [INFO] Stream ${streamIdx} reconnected`);
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Reconnect failed for stream ${streamIdx}: ${error.message}`);
-        await this.handleReconnect(streamIdx);
-    }
-}
 
     getStatus() {
         return {
@@ -486,60 +453,24 @@ async handleReconnect(streamIdx = null) {
         };
     }
 
-async stop() {
-    console.log(`[${new Date().toISOString()}] [INFO] Stopping gRPC service`);
-    this.isStarted = false;
-    this.streams?.forEach(stream => stream.end());
-    this.clients?.forEach(client => client.close?.());
-    this.streams = [];
-    this.clients = [];
-    this.monitoredWallets.clear();
-}
-
-async shutdown() {
-    console.log(`[${new Date().toISOString()}] [INFO] Initiating gRPC service shutdown`);
-
-    if (this.streams && this.streams.length > 0) {
-        console.log(`[${new Date().toISOString()}] [INFO] Closing ${this.streams.length} gRPC streams`);
-        this.streams.forEach((stream, idx) => {
-            try {
-                stream.end();
-                console.log(`[${new Date().toISOString()}] [INFO] Stream ${idx} closed`);
-            } catch (error) {
-                console.error(`[${new Date().toISOString()}] [ERROR] Error closing stream ${idx}: ${error.message}`, error.stack);
-            }
-        });
-        this.streams = [];
+    async stop() {
+        console.log(`[${new Date().toISOString()}] [INFO] Stopping gRPC service`);
+        this.isStarted = false;
+        if (this.stream) this.stream.end();
+        if (this.client) {
+            if (typeof this.client.close === 'function') this.client.close();
+            else if (typeof this.client.destroy === 'function') this.client.destroy();
+            else if (typeof this.client.end === 'function') this.client.end();
+            this.client = null;
+        }
+        this.monitoredWallets.clear();
     }
 
-    if (this.clients && this.clients.length > 0) {
-        console.log(`[${new Date().toISOString()}] [INFO] Closing ${this.clients.length} gRPC clients`);
-        this.clients.forEach((client, idx) => {
-            try {
-                if (typeof client.close === 'function') client.close();
-                else if (typeof client.destroy === 'function') client.destroy();
-                else if (typeof client.end === 'function') client.end();
-                console.log(`[${new Date().toISOString()}] [INFO] Client ${idx} closed`);
-            } catch (error) {
-                console.error(`[${new Date().toISOString()}] [ERROR] Error closing client ${idx}: ${error.message}`, error.stack);
-            }
-        });
-        this.clients = [];
+    async shutdown() {
+        await this.stop();
+        await this.db.close().catch(error => console.error(`[${new Date().toISOString()}] [ERROR] Error closing DB: ${error.message}`));
+        console.log(`[${new Date().toISOString()}] [INFO] Shutdown complete`);
     }
-
-    this.monitoredWallets.clear();
-    console.log(`[${new Date().toISOString()}] [INFO] Cleared monitored wallets`);
-
-    try {
-        await this.db.close();
-        console.log(`[${new Date().toISOString()}] [INFO] Database connection closed`);
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Error closing database: ${error.message}`, error.stack);
-    }
-
-    this.isStarted = false;
-    console.log(`[${new Date().toISOString()}] [INFO] Shutdown complete`);
-}
 }
 
 module.exports = SolanaGrpcService;
