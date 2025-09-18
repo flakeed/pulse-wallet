@@ -2,6 +2,7 @@ const { default: Client, CommitmentLevel } = require('@triton-one/yellowstone-gr
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 const { PublicKey } = require('@solana/web3.js');
+const bs58 = require('bs58');
 
 class SolanaGrpcService {
     constructor() {
@@ -264,20 +265,43 @@ class SolanaGrpcService {
         }
     }
 
-    extractSignature(transactionData) {
-        try {
-            const sigObj = transactionData.signature || (transactionData.signatures && transactionData.signatures[0]) ||
-                          transactionData.transaction?.signature || (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
-                          transactionData.tx?.signature || (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
-            if (sigObj) {
-                return Buffer.from(sigObj.data || sigObj).toString('base64');
-            }
-            return null;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error extracting signature: ${error.message}`);
+extractSignature(transactionData) {
+    try {
+        const sigObj = transactionData.signature || 
+                      (transactionData.signatures && transactionData.signatures[0]) ||
+                      transactionData.transaction?.signature || 
+                      (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
+                      transactionData.tx?.signature || 
+                      (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+        
+        if (!sigObj) {
+            console.warn(`[${new Date().toISOString()}] [WARN] No signature found in transaction data`);
             return null;
         }
+
+        let signature;
+        if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
+            signature = bs58.encode(Buffer.from(sigObj.data));
+        } else if (Buffer.isBuffer(sigObj)) {
+            signature = bs58.encode(sigObj);
+        } else if (typeof sigObj === 'string') {
+            signature = sigObj; 
+        } else {
+            console.warn(`[${new Date().toISOString()}] [WARN] Unexpected signature format: ${typeof sigObj}`);
+            signature = bs58.encode(Buffer.from(sigObj));
+        }
+
+        if (signature.length < 80 || signature.length > 88) {
+            console.warn(`[${new Date().toISOString()}] [WARN] Invalid signature length: ${signature.length}`);
+            return null;
+        }
+
+        return signature;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Error extracting signature: ${error.message}`, error.stack);
+        return null;
     }
+}
 
     convertGrpcToLegacyFormat(grpcData, accountKeys) {
         try {
