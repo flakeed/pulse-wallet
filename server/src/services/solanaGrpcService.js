@@ -314,97 +314,185 @@ async createStreamForChunk(walletChunk, chunkIndex) {
         console.log(`[${new Date().toISOString()}] [INFO] Batch processed: ${successful}/${batch.size} successful`);
     }
 
-    async processTransaction(transactionData) {
+async processTransaction(transactionData) {
+    try {
+        console.log(`[${new Date().toISOString()}] [DEBUG] Starting transaction processing`);
+        
+        let transaction = null, meta = null;
+
+        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction data keys:`, Object.keys(transactionData));
+        
+        if (transactionData.transaction?.transaction) {
+            transaction = transactionData.transaction.transaction;
+            meta = transactionData.transaction.meta;
+            console.log(`[${new Date().toISOString()}] [DEBUG] Using nested transaction structure`);
+        } else if (transactionData.transaction && transactionData.meta) {
+            transaction = transactionData.transaction;
+            meta = transactionData.meta;
+            console.log(`[${new Date().toISOString()}] [DEBUG] Using direct transaction/meta structure`);
+        } else {
+            transaction = transactionData.transaction || transactionData;
+            meta = transactionData.meta || transactionData;
+            console.log(`[${new Date().toISOString()}] [DEBUG] Using fallback structure`);
+        }
+
+        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction:`, !!transaction, `Meta:`, !!meta);
+
+        if (!transaction || !meta || meta.err) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - missing transaction/meta or has error:`, {
+                hasTransaction: !!transaction,
+                hasMeta: !!meta,
+                hasError: !!meta?.err
+            });
+            return null;
+        }
+
+        const signature = this.extractSignature(transactionData) || transactionData.signature;
+        console.log(`[${new Date().toISOString()}] [DEBUG] Extracted signature:`, signature);
+        
+        if (!signature) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - no valid signature`);
+            return null;
+        }
+
+        const processedKey = `${signature}`;
+        const isProcessed = this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey);
+        console.log(`[${new Date().toISOString()}] [DEBUG] Processed check:`, {
+            inProcessedTransactions: this.processedTransactions.has(signature),
+            inRecentlyProcessed: this.recentlyProcessed.has(processedKey),
+            isProcessed
+        });
+
+        if (isProcessed) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - already processed`);
+            return null;
+        }
+
+        this.processedTransactions.add(signature);
+        this.recentlyProcessed.add(processedKey);
+
         try {
-            let transaction = null, meta = null;
-
-            if (transactionData.transaction?.transaction) {
-                transaction = transactionData.transaction.transaction;
-                meta = transactionData.transaction.meta;
-            } else if (transactionData.transaction && transactionData.meta) {
-                transaction = transactionData.transaction;
-                meta = transactionData.meta;
-            } else {
-                transaction = transactionData.transaction || transactionData;
-                meta = transactionData.meta || transactionData;
-            }
-
-            if (!transaction || !meta || meta.err) {
-                return null;
-            }
-
-            const signature = this.extractSignature(transactionData) || transactionData.signature;
-            if (!signature) return null;
-
-            const processedKey = `${signature}`;
-            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
-                return null;
-            }
-
-            this.processedTransactions.add(signature);
-            this.recentlyProcessed.add(processedKey);
-
             const existingTx = await this.db.pool.query(
                 'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
                 [signature]
             );
+            console.log(`[${new Date().toISOString()}] [DEBUG] DB check:`, {
+                exists: existingTx.rows.length > 0,
+                rowCount: existingTx.rows.length
+            });
+            
             if (existingTx.rows.length > 0) {
+                console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - exists in DB`);
                 return null;
             }
-
-            let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
-            if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
-            if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
-
-            const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
-            const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
-            if (!involvedWallet) return null;
-
-            console.log(`[${new Date().toISOString()}] [DEBUG] Processing transaction ${signature}, involved wallet: ${involvedWallet}, groupId: ${this.activeGroupId}`);
-            let groupWallets = new Set();
-            if (this.activeGroupId) {
-                groupWallets = await this.getGroupWallets(this.activeGroupId);
-                if (!groupWallets.has(involvedWallet)) {
-                    console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: wallet ${involvedWallet} not in group ${this.activeGroupId}`);
-                    return null;
-                }
-            }
-
-            const walletCacheKey = `wallet:${involvedWallet}`;
-            let wallet = null;
-
-            try {
-                const cachedWallet = await redis.get(walletCacheKey);
-                if (cachedWallet) {
-                    wallet = JSON.parse(cachedWallet);
-                } else {
-                    wallet = await this.db.getWalletByAddress(involvedWallet);
-                    if (wallet) {
-                        await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
-                    }
-                }
-            } catch (error) {
-                wallet = await this.db.getWalletByAddress(involvedWallet);
-            }
-
-            if (!wallet) return null;
-
-            const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
-
-            return await this.processTransactionFromGrpcData({
-                signature,
-                transaction,
-                meta,
-                blockTime,
-                wallet,
-                accountKeys: stringAccountKeys
-            });
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`);
+        } catch (dbError) {
+            console.error(`[${new Date().toISOString()}] [ERROR] DB check failed:`, dbError.message);
             return null;
         }
+
+        let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
+        if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
+        if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
+
+        console.log(`[${new Date().toISOString()}] [DEBUG] Account keys:`, {
+            messageKeys: transaction.message?.accountKeys?.length || 0,
+            accountKeys: transaction.accountKeys?.length || 0,
+            writable: meta.loadedWritableAddresses?.length || 0,
+            readonly: meta.loadedReadonlyAddresses?.length || 0,
+            total: accountKeys.length
+        });
+
+        const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
+        console.log(`[${new Date().toISOString()}] [DEBUG] Converted ${stringAccountKeys.length} string account keys`);
+
+        const involvedWallet = Array.from(this.monitoredWallets).find(wallet => 
+            stringAccountKeys.includes(wallet)
+        );
+        console.log(`[${new Date().toISOString()}] [DEBUG] Involved wallet search:`, {
+            monitoredWallets: this.monitoredWallets.size,
+            foundWallet: !!involvedWallet,
+            walletAddress: involvedWallet
+        });
+
+        if (!involvedWallet) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - no monitored wallet involved`);
+            return null;
+        }
+
+        console.log(`[${new Date().toISOString()}] [DEBUG] Processing transaction ${signature}, involved wallet: ${involvedWallet}, groupId: ${this.activeGroupId}`);
+        let groupWallets = new Set();
+        if (this.activeGroupId) {
+            groupWallets = await this.getGroupWallets(this.activeGroupId);
+            const inGroup = groupWallets.has(involvedWallet);
+            console.log(`[${new Date().toISOString()}] [DEBUG] Group validation:`, {
+                activeGroupId: this.activeGroupId,
+                inGroup,
+                groupSize: groupWallets.size
+            });
+            
+            if (!inGroup) {
+                console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: wallet ${involvedWallet} not in group ${this.activeGroupId}`);
+                return null;
+            }
+        }
+
+        const walletCacheKey = `wallet:${involvedWallet}`;
+        let wallet = null;
+
+        try {
+            const cachedWallet = await redis.get(walletCacheKey);
+            console.log(`[${new Date().toISOString()}] [DEBUG] Wallet cache hit:`, !!cachedWallet);
+            
+            if (cachedWallet) {
+                wallet = JSON.parse(cachedWallet);
+                console.log(`[${new Date().toISOString()}] [DEBUG] Using cached wallet:`, wallet.name || 'unnamed');
+            } else {
+                wallet = await this.db.getWalletByAddress(involvedWallet);
+                console.log(`[${new Date().toISOString()}] [DEBUG] DB wallet lookup:`, !!wallet);
+                
+                if (wallet) {
+                    await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
+                    console.log(`[${new Date().toISOString()}] [DEBUG] Cached wallet for ${involvedWallet}`);
+                }
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Wallet lookup error:`, error.message);
+            wallet = await this.db.getWalletByAddress(involvedWallet);
+        }
+
+        if (!wallet) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - wallet not found: ${involvedWallet}`);
+            return null;
+        }
+
+        console.log(`[${new Date().toISOString()}] [DEBUG] Wallet found: ${wallet.name} (${wallet.address})`);
+
+        const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+        console.log(`[${new Date().toISOString()}] [DEBUG] Block time: ${blockTime}`);
+
+        const result = await this.processTransactionFromGrpcData({
+            signature,
+            transaction,
+            meta,
+            blockTime,
+            wallet,
+            accountKeys: stringAccountKeys
+        });
+
+        if (result) {
+            console.log(`[${new Date().toISOString()}] [SUCCESS] Transaction ${signature} processed successfully`);
+        } else {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} failed in final processing`);
+        }
+
+        return result;
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`);
+        console.error(`[${new Date().toISOString()}] [ERROR] Stack:`, error.stack);
+        return null;
     }
+}
 
     convertAccountKeysToStrings(accountKeys) {
         const stringAccountKeys = [];
