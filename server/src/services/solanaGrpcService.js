@@ -20,7 +20,7 @@ class SolanaGrpcService {
         this.messageCount = 0;
         this.activeGroupId = null;
         this.allMonitoredWallets = new Set();
-        this.chunkSize = parseInt(process.env.GRPC_CHUNK_SIZE) || 1000;
+        this.chunkSize = parseInt(process.env.GRPC_CHUNK_SIZE) || 10000;
         this.processedTransactions = new Set();
         this.recentlyProcessed = new Set();
         this.solPriceCache = {
@@ -30,8 +30,8 @@ class SolanaGrpcService {
         };
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 50;
-        this.batchTimeout = 200;
+        this.batchSize = 200;
+        this.batchTimeout = 100;
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
@@ -161,10 +161,10 @@ class SolanaGrpcService {
             const chunkWallets = new Set(walletArray.slice(start, end));
             await this.createSingleStream(chunkWallets);
             if (i < numChunks - 1) {
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
-
+createAllStreams
         console.log(`[${new Date().toISOString()}] [INFO] All streams created successfully. Total streams: ${this.streams.length}`);
     }
 
@@ -173,16 +173,18 @@ class SolanaGrpcService {
 
         try {
             console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for chunk of ${chunkWallets.size} wallets`);
-            const client = new Client(this.grpcEndpoint, undefined, {
-                'grpc.keepalive_time_ms': 30000,
-                'grpc.keepalive_timeout_ms': 5000,
-                'grpc.keepalive_permit_without_calls': true,
-                'grpc.http2.max_pings_without_data': 0,
-                'grpc.http2.min_time_between_pings_ms': 10000,
-                'grpc.http2.min_ping_interval_without_data_ms': 300000,
-                'grpc.max_receive_message_length': 64 * 1024 * 1024,
-                'grpc.max_send_message_length': 64 * 1024 * 1024
-            });
+const client = new Client(this.grpcEndpoint, undefined, {
+            'grpc.keepalive_time_ms': 30000,
+            'grpc.keepalive_timeout_ms': 5000,
+            'grpc.keepalive_permit_without_calls': true,
+            'grpc.http2.max_pings_without_data': 0,
+            'grpc.http2.min_time_between_pings_ms': 10000,
+            'grpc.http2.min_ping_interval_without_data_ms': 300000,
+            'grpc.max_receive_message_length': 128 * 1024 * 1024, 
+            'grpc.max_send_message_length': 128 * 1024 * 1024,  
+            'grpc.http2.max_concurrent_streams': 1000,           
+            'grpc.keepalive_without_calls': true                 
+        });
 
             const stream = await client.subscribe();
             stream.on('data', data => {
@@ -897,7 +899,7 @@ class SolanaGrpcService {
         return { successful, failed, errors, totalMonitored: this.allMonitoredWallets.size };
     }
 
-    async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 1000) {
+    async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 10000) {
         const startTime = Date.now();
         let successful = 0;
 
