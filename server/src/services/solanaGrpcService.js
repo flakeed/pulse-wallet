@@ -211,18 +211,25 @@ class SolanaGrpcService {
         if (this.isStarted) this.handleReconnect();
     }
 
-    async subscribeToWalletsBatch(walletAddresses) {
-        if (!walletAddresses || walletAddresses.length === 0) return;
-        
-        const startTime = Date.now();
+async subscribeToWalletsBatch(walletAddresses) {
+    if (!walletAddresses || walletAddresses.length === 0) return;
+    
+    const startTime = Date.now();
+    const results = {
+        successful: 0,
+        failed: 0,
+        errors: []
+    };
 
-        const results = {
-            successful: 0,
-            failed: 0,
-            errors: []
-        };
+    walletAddresses.forEach(walletAddress => {
+        if (!walletAddress || typeof walletAddress !== 'string') {
+            results.errors.push({ address: walletAddress, error: 'Invalid or undefined wallet address' });
+            results.failed++;
+            return;
+        }
 
-        walletAddresses.forEach(walletAddress => {
+        try {
+            new PublicKey(walletAddress); 
             if (this.monitoredWallets.has(walletAddress)) {
                 results.successful++;
                 return;
@@ -236,18 +243,29 @@ class SolanaGrpcService {
 
             this.monitoredWallets.add(walletAddress);
             results.successful++;
-        });
+        } catch (error) {
+            results.errors.push({ address: walletAddress, error: `Invalid Solana public key: ${error.message}` });
+            results.failed++;
+        }
+    });
 
+    if (results.successful > 0) {
         await this.restartStream();
-
-        const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] ✅ Global batch subscription completed in ${duration}ms:`);
-        console.log(`  - Successful: ${results.successful}`);
-        console.log(`  - Failed: ${results.failed}`);
-        console.log(`  - Total active subscriptions: ${this.monitoredWallets.size}`);
-
-        return results;
+    } else {
+        console.log(`[${new Date().toISOString()}] ⚠️ No valid wallets to subscribe, skipping stream restart`);
     }
+
+    const duration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] ✅ Global batch subscription completed in ${duration}ms:`);
+    console.log(`  - Successful: ${results.successful}`);
+    console.log(`  - Failed: ${results.failed}`);
+    console.log(`  - Total active subscriptions: ${this.monitoredWallets.size}`);
+    if (results.errors.length > 0) {
+        console.log(`  - Errors:`, results.errors);
+    }
+
+    return results;
+}
 
 async restartStream() {
     try {
