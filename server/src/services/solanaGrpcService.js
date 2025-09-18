@@ -34,8 +34,9 @@ class SolanaGrpcService {
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
         this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
         this.setupCacheCleanup();
-        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
     setupCacheCleanup() {
@@ -46,7 +47,6 @@ class SolanaGrpcService {
                 if (this.processedTransactions.size > 50000) {
                     const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
                     toDelete.forEach(sig => this.processedTransactions.delete(sig));
-                    console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
                 }
                 this.lastProcessedCleanup = now;
             }
@@ -55,14 +55,8 @@ class SolanaGrpcService {
                 if (this.recentlyProcessed.size > 5000) {
                     const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
                     toDelete.forEach(key => this.recentlyProcessed.delete(key));
-                    console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
                 }
                 this.lastRecentlyProcessedCleanup = now;
-            }
-
-            if (now % (6 * 60 * 60 * 1000) < 300000) {
-                console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
-                console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
             }
         }, 300000);
     }
@@ -114,7 +108,6 @@ class SolanaGrpcService {
                 }
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
         }
 
         return this.solPriceCache.price;
@@ -122,17 +115,14 @@ class SolanaGrpcService {
 
     async start(groupId = null) {
         if (this.isStarted) {
-            console.log(`[${new Date().toISOString()}] [INFO] gRPC service already started`);
             return;
         }
-        console.log(`[${new Date().toISOString()}] [INFO] Starting gRPC service`);
         this.isStarted = true;
         this.activeGroupId = groupId;
         try {
             await this.connect();
             await this.subscribeToAllWallets();
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Failed to start gRPC service: ${error.message}`);
             this.isStarted = false;
             throw error;
         }
@@ -141,7 +131,6 @@ class SolanaGrpcService {
     async connect() {
         if (this.isConnecting || this.client) return;
         this.isConnecting = true;
-        console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC endpoint: ${this.grpcEndpoint}`);
         try {
             this.client = new Client(this.grpcEndpoint, undefined, {
                 'grpc.keepalive_time_ms': 30000,
@@ -154,127 +143,99 @@ class SolanaGrpcService {
                 'grpc.max_send_message_length': 64 * 1024 * 1024
             });
             this.reconnectAttempts = 0;
-            console.log(`[${new Date().toISOString()}] [INFO] gRPC client connected successfully`);
             this.isConnecting = false;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Failed to connect to gRPC: ${error.message}`);
             this.isConnecting = false;
             throw error;
         }
     }
 
-async subscribeToAllWallets() {
-    console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets`);
-    const wallets = await this.db.getActiveWallets(null);
-    this.monitoredWallets.clear();
-    wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-    console.log(`[${new Date().toISOString()}] 📊 Found ${this.monitoredWallets.size} active wallets globally`);
+    async subscribeToAllWallets() {
+        const wallets = await this.db.getActiveWallets(null);
+        this.monitoredWallets.clear();
+        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
 
-    if (this.monitoredWallets.size === 0) {
-        console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
-        return;
-    }
-
-    const CHUNK_SIZE = 5000; 
-    const walletChunks = this.chunkArray(Array.from(this.monitoredWallets), CHUNK_SIZE);
-    
-    console.log(`[${new Date().toISOString()}] [INFO] Creating ${walletChunks.length} chunks for subscription`);
-
-    try {
-        this.streams = [];
-        
-        for (let i = 0; i < walletChunks.length; i++) {
-            const chunk = walletChunks[i];
-            console.log(`[${new Date().toISOString()}] [INFO] Creating stream ${i + 1}/${walletChunks.length} for ${chunk.length} wallets`);
-            
-            await this.createStreamForChunk(chunk, i);
-            
-            if (i < walletChunks.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
+        if (this.monitoredWallets.size === 0) {
+            return;
         }
 
-        console.log(`[${new Date().toISOString()}] [INFO] All streams created successfully`);
-        
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Error creating chunked streams: ${error.message}`);
-        throw error;
-    }
-}
+        const MAX_WALLETS = parseInt(process.env.MAX_MONITORED_WALLETS) || 10000;
+        if (this.monitoredWallets.size > MAX_WALLETS) {
+            const sampledWallets = Array.from(this.monitoredWallets)
+                .sort(() => 0.5 - Math.random())
+                .slice(0, MAX_WALLETS);
+            this.monitoredWallets.clear();
+            sampledWallets.forEach(wallet => this.monitoredWallets.add(wallet));
+        }
 
-chunkArray(array, chunkSize) {
-    const chunks = [];
-    for (let i = 0; i < array.length; i += chunkSize) {
-        chunks.push(array.slice(i, i + chunkSize));
-    }
-    return chunks;
-}
+        if (this.stream) {
+            this.stream.end();
+        }
 
-async createStreamForChunk(walletChunk, chunkIndex) {
-    const request = {
-        accounts: {},
-        slots: {},
-        transactions: {
-            client: {
-                vote: false,
-                failed: false,
-                accountInclude: walletChunk,
-                accountExclude: [],
-                accountRequired: []
-            }
-        },
-        transactionsStatus: {},
-        entry: {},
-        blocks: {},
-        blocksMeta: {},
-        commitment: CommitmentLevel.CONFIRMED,
-        accountsDataSlice: []
-    };
+        const request = {
+            accounts: {},
+            slots: {},
+            transactions: {
+                client: {
+                    vote: false,
+                    failed: false,
+                    accountInclude: Array.from(this.monitoredWallets),
+                    accountExclude: [],
+                    accountRequired: []
+                }
+            },
+            transactionsStatus: {},
+            entry: {},
+            blocks: {},
+            blocksMeta: {},
+            commitment: CommitmentLevel.CONFIRMED,
+            accountsDataSlice: []
+        };
 
-    try {
-        const stream = await this.client.subscribe();
-        stream.on('data', data => {
-            this.messageCount++;
-            this.handleGrpcMessageBatched(data, chunkIndex);
-        });
-        stream.on('error', error => {
-            console.error(`[${new Date().toISOString()}] [ERROR] Stream ${chunkIndex} error: ${error.message}`);
-            this.handleStreamReconnect(chunkIndex);
-        });
-        stream.on('end', () => {
-            console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} ended`);
-            if (this.isStarted) setTimeout(() => this.handleStreamReconnect(chunkIndex), 2000);
-        });
+        try {
+            this.stream = await this.client.subscribe();
+            this.stream.on('data', data => {
+                this.messageCount++;
+                this.handleGrpcMessageBatched(data);
+            });
+            this.stream.on('error', error => {
+                this.handleReconnect();
+            });
+            this.stream.on('end', () => {
+                if (this.isStarted) setTimeout(() => this.handleReconnect(), 2000);
+            });
 
-        await new Promise((resolve, reject) => {
-            stream.write(request, err => {
+            await new Promise((resolve, reject) => this.stream.write(request, err => {
                 if (err) {
-                    console.error(`[${new Date().toISOString()}] [ERROR] Stream ${chunkIndex} subscription failed: ${err.message}`);
                     reject(err);
                 } else {
-                    console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} subscription sent successfully`);
                     resolve();
                 }
-            });
-        });
-
-        this.streams[chunkIndex] = stream;
-        console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} active, monitoring ${walletChunk.length} wallets`);
-
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream ${chunkIndex}: ${error.message}`);
-        throw error;
+            }));
+        } catch (error) {
+            throw error;
+        }
     }
-}
 
     handleGrpcMessageBatched(data) {
         try {
-            if (!data.transaction) return;
+            let transactionData = null;
+            if (data.transaction) {
+                transactionData = data;
+            } else if (data.transactionStatus) {
+                transactionData = data;
+            }
 
-            const signature = this.extractSignature(data.transaction);
-            if (!signature) return;
+            if (!transactionData) {
+                return;
+            }
 
-            this.transactionBatch.set(signature, data);
+            const signature = this.extractSignature(transactionData);
+            if (!signature) {
+                return;
+            }
+
+            this.transactionBatch.set(signature, transactionData);
 
             if (!this.batchTimer) {
                 this.batchTimer = setTimeout(() => {
@@ -288,7 +249,6 @@ async createStreamForChunk(walletChunk, chunkIndex) {
                 this.processBatch();
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error handling gRPC message: ${error.message}`);
         }
     }
 
@@ -299,200 +259,121 @@ async createStreamForChunk(walletChunk, chunkIndex) {
         this.transactionBatch.clear();
         this.batchTimer = null;
 
-        console.log(`[${new Date().toISOString()}] [INFO] Processing batch of ${batch.size} transactions`);
-
         const promises = Array.from(batch.entries()).map(([signature, data]) =>
             this.processTransaction(data).catch(error => {
-                console.error(`[${new Date().toISOString()}] [ERROR] Failed to process transaction ${signature}: ${error.message}`);
                 return null;
             })
         );
 
         const results = await Promise.allSettled(promises);
         const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-
-        console.log(`[${new Date().toISOString()}] [INFO] Batch processed: ${successful}/${batch.size} successful`);
     }
 
-async processTransaction(transactionData) {
-    try {
-        console.log(`[${new Date().toISOString()}] [DEBUG] Starting transaction processing`);
-        
-        let transaction = null, meta = null;
-
-        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction data keys:`, Object.keys(transactionData));
-        
-        if (transactionData.transaction?.transaction) {
-            transaction = transactionData.transaction.transaction;
-            meta = transactionData.transaction.meta;
-            console.log(`[${new Date().toISOString()}] [DEBUG] Using nested transaction structure`);
-        } else if (transactionData.transaction && transactionData.meta) {
-            transaction = transactionData.transaction;
-            meta = transactionData.meta;
-            console.log(`[${new Date().toISOString()}] [DEBUG] Using direct transaction/meta structure`);
-        } else {
-            transaction = transactionData.transaction || transactionData;
-            meta = transactionData.meta || transactionData;
-            console.log(`[${new Date().toISOString()}] [DEBUG] Using fallback structure`);
-        }
-
-        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction:`, !!transaction, `Meta:`, !!meta);
-
-        if (!transaction || !meta || meta.err) {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - missing transaction/meta or has error:`, {
-                hasTransaction: !!transaction,
-                hasMeta: !!meta,
-                hasError: !!meta?.err
-            });
-            return null;
-        }
-
-        const signature = this.extractSignature(transactionData) || transactionData.signature;
-        console.log(`[${new Date().toISOString()}] [DEBUG] Extracted signature:`, signature);
-        
-        if (!signature) {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - no valid signature`);
-            return null;
-        }
-
-        const processedKey = `${signature}`;
-        const isProcessed = this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey);
-        console.log(`[${new Date().toISOString()}] [DEBUG] Processed check:`, {
-            inProcessedTransactions: this.processedTransactions.has(signature),
-            inRecentlyProcessed: this.recentlyProcessed.has(processedKey),
-            isProcessed
-        });
-
-        if (isProcessed) {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - already processed`);
-            return null;
-        }
-
-        this.processedTransactions.add(signature);
-        this.recentlyProcessed.add(processedKey);
-
+    async processTransaction(transactionData) {
         try {
+            let transaction = null, meta = null;
+
+            if (transactionData.transaction) {
+                transaction = transactionData.transaction;
+                meta = transactionData.transaction.meta || transactionData.meta;
+            } else if (transactionData.transactionStatus) {
+                transaction = transactionData.transactionStatus;
+                meta = transactionData.transactionStatus.meta || transactionData.meta;
+            } else {
+                transaction = transactionData.transaction?.transaction || transactionData;
+                meta = transactionData.transaction?.meta || transactionData.meta || transactionData;
+            }
+
+            if (!transaction || !meta) {
+                return null;
+            }
+
+            if (meta.err) {
+                return null;
+            }
+
+            const signature = this.extractSignature(transactionData) || transactionData.signature;
+            if (!signature) return null;
+
+            const processedKey = `${signature}`;
+            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
+                return null;
+            }
+
+            this.processedTransactions.add(signature);
+            this.recentlyProcessed.add(processedKey);
+
             const existingTx = await this.db.pool.query(
                 'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
                 [signature]
             );
-            console.log(`[${new Date().toISOString()}] [DEBUG] DB check:`, {
-                exists: existingTx.rows.length > 0,
-                rowCount: existingTx.rows.length
-            });
-            
             if (existingTx.rows.length > 0) {
-                console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - exists in DB`);
                 return null;
             }
-        } catch (dbError) {
-            console.error(`[${new Date().toISOString()}] [ERROR] DB check failed:`, dbError.message);
-            return null;
-        }
 
-        let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
-        if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
-        if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
-
-        console.log(`[${new Date().toISOString()}] [DEBUG] Account keys:`, {
-            messageKeys: transaction.message?.accountKeys?.length || 0,
-            accountKeys: transaction.accountKeys?.length || 0,
-            writable: meta.loadedWritableAddresses?.length || 0,
-            readonly: meta.loadedReadonlyAddresses?.length || 0,
-            total: accountKeys.length
-        });
-
-        const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
-        console.log(`[${new Date().toISOString()}] [DEBUG] Converted ${stringAccountKeys.length} string account keys`);
-
-        const involvedWallet = Array.from(this.monitoredWallets).find(wallet => 
-            stringAccountKeys.includes(wallet)
-        );
-        console.log(`[${new Date().toISOString()}] [DEBUG] Involved wallet search:`, {
-            monitoredWallets: this.monitoredWallets.size,
-            foundWallet: !!involvedWallet,
-            walletAddress: involvedWallet
-        });
-
-        if (!involvedWallet) {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - no monitored wallet involved`);
-            return null;
-        }
-
-        console.log(`[${new Date().toISOString()}] [DEBUG] Processing transaction ${signature}, involved wallet: ${involvedWallet}, groupId: ${this.activeGroupId}`);
-        let groupWallets = new Set();
-        if (this.activeGroupId) {
-            groupWallets = await this.getGroupWallets(this.activeGroupId);
-            const inGroup = groupWallets.has(involvedWallet);
-            console.log(`[${new Date().toISOString()}] [DEBUG] Group validation:`, {
-                activeGroupId: this.activeGroupId,
-                inGroup,
-                groupSize: groupWallets.size
-            });
+            let accountKeys = [];
             
-            if (!inGroup) {
-                console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: wallet ${involvedWallet} not in group ${this.activeGroupId}`);
-                return null;
+            if (transaction.message?.accountKeys) {
+                accountKeys = transaction.message.accountKeys;
+            } else if (transaction.accountKeys) {
+                accountKeys = transaction.accountKeys;
+            } else if (meta.accountKeys) {
+                accountKeys = meta.accountKeys;
             }
-        }
 
-        const walletCacheKey = `wallet:${involvedWallet}`;
-        let wallet = null;
+            if (meta.loadedAddresses?.writable) {
+                accountKeys = accountKeys.concat(meta.loadedAddresses.writable);
+            }
+            if (meta.loadedAddresses?.readonly) {
+                accountKeys = accountKeys.concat(meta.loadedAddresses.readonly);
+            }
 
-        try {
-            const cachedWallet = await redis.get(walletCacheKey);
-            console.log(`[${new Date().toISOString()}] [DEBUG] Wallet cache hit:`, !!cachedWallet);
-            
-            if (cachedWallet) {
-                wallet = JSON.parse(cachedWallet);
-                console.log(`[${new Date().toISOString()}] [DEBUG] Using cached wallet:`, wallet.name || 'unnamed');
-            } else {
-                wallet = await this.db.getWalletByAddress(involvedWallet);
-                console.log(`[${new Date().toISOString()}] [DEBUG] DB wallet lookup:`, !!wallet);
-                
-                if (wallet) {
-                    await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
-                    console.log(`[${new Date().toISOString()}] [DEBUG] Cached wallet for ${involvedWallet}`);
+            const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
+            const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
+            if (!involvedWallet) return null;
+
+            let groupWallets = new Set();
+            if (this.activeGroupId) {
+                groupWallets = await this.getGroupWallets(this.activeGroupId);
+                if (!groupWallets.has(involvedWallet)) {
+                    return null;
                 }
             }
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Wallet lookup error:`, error.message);
-            wallet = await this.db.getWalletByAddress(involvedWallet);
-        }
 
-        if (!wallet) {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Skipping - wallet not found: ${involvedWallet}`);
+            const walletCacheKey = `wallet:${involvedWallet}`;
+            let wallet = null;
+
+            try {
+                const cachedWallet = await redis.get(walletCacheKey);
+                if (cachedWallet) {
+                    wallet = JSON.parse(cachedWallet);
+                } else {
+                    wallet = await this.db.getWalletByAddress(involvedWallet);
+                    if (wallet) {
+                        await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
+                    }
+                }
+            } catch (error) {
+                wallet = await this.db.getWalletByAddress(involvedWallet);
+            }
+
+            if (!wallet) return null;
+
+            const blockTime = Number(transactionData.blockTime) || Number(meta.blockTime) || Math.floor(Date.now() / 1000);
+
+            return await this.processTransactionFromGrpcData({
+                signature,
+                transaction,
+                meta,
+                blockTime,
+                wallet,
+                accountKeys: stringAccountKeys
+            });
+
+        } catch (error) {
             return null;
         }
-
-        console.log(`[${new Date().toISOString()}] [DEBUG] Wallet found: ${wallet.name} (${wallet.address})`);
-
-        const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
-        console.log(`[${new Date().toISOString()}] [DEBUG] Block time: ${blockTime}`);
-
-        const result = await this.processTransactionFromGrpcData({
-            signature,
-            transaction,
-            meta,
-            blockTime,
-            wallet,
-            accountKeys: stringAccountKeys
-        });
-
-        if (result) {
-            console.log(`[${new Date().toISOString()}] [SUCCESS] Transaction ${signature} processed successfully`);
-        } else {
-            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} failed in final processing`);
-        }
-
-        return result;
-
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`);
-        console.error(`[${new Date().toISOString()}] [ERROR] Stack:`, error.stack);
-        return null;
     }
-}
 
     convertAccountKeysToStrings(accountKeys) {
         const stringAccountKeys = [];
@@ -519,7 +400,6 @@ async processTransaction(transactionData) {
                     stringAccountKeys.push(convertedKey);
                 }
             } catch (error) {
-                console.error(`[${new Date().toISOString()}] [ERROR] Error converting account key: ${error.message}`);
             }
         }
 
@@ -583,14 +463,12 @@ async processTransaction(transactionData) {
                 }
                 await pipeline.exec();
 
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType})`);
                 return savedTransaction;
             }
 
             return null;
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction: ${error.message}`);
             return null;
         }
     }
@@ -645,7 +523,6 @@ async processTransaction(transactionData) {
                 };
             });
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error saving transaction to DB: ${error.message}`);
             return null;
         }
     }
@@ -685,7 +562,6 @@ async processTransaction(transactionData) {
             ]);
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error saving token operation: ${error.message}`);
             throw error;
         }
     }
@@ -875,7 +751,6 @@ async processTransaction(transactionData) {
                 await cachePipeline.exec();
 
             } catch (error) {
-                console.error(`[${new Date().toISOString()}] ❌ Error batch fetching token metadata:`, error.message);
                 for (const mint of uncachedMints) {
                     if (!tokenInfos.has(mint)) {
                         tokenInfos.set(mint, {
@@ -893,12 +768,19 @@ async processTransaction(transactionData) {
 
     extractSignature(transactionData) {
         try {
-            const sigObj = transactionData.signature ||
-                (transactionData.signatures && transactionData.signatures[0]) ||
-                transactionData.transaction?.signature ||
-                (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
-                transactionData.tx?.signature ||
-                (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+            let sigObj = null;
+
+            if (transactionData.signature) {
+                sigObj = transactionData.signature;
+            } else if (transactionData.transaction?.signature) {
+                sigObj = transactionData.transaction.signature;
+            } else if (transactionData.transactionStatus?.signature) {
+                sigObj = transactionData.transactionStatus.signature;
+            } else if (transactionData.transaction?.signatures?.[0]) {
+                sigObj = transactionData.transaction.signatures[0];
+            } else if (transactionData.signatures?.[0]) {
+                sigObj = transactionData.signatures[0];
+            }
 
             if (!sigObj) {
                 return null;
@@ -911,8 +793,14 @@ async processTransaction(transactionData) {
                 signature = bs58.encode(sigObj);
             } else if (typeof sigObj === 'string') {
                 signature = sigObj;
+            } else if (typeof sigObj === 'object' && sigObj.data) {
+                signature = bs58.encode(Buffer.from(sigObj.data));
             } else {
-                signature = bs58.encode(Buffer.from(sigObj));
+                try {
+                    signature = bs58.encode(Buffer.from(sigObj));
+                } catch (e) {
+                    return null;
+                }
             }
 
             if (signature.length < 80 || signature.length > 88) {
@@ -921,7 +809,6 @@ async processTransaction(transactionData) {
 
             return signature;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error extracting signature: ${error.message}`);
             return null;
         }
     }
@@ -958,7 +845,6 @@ async processTransaction(transactionData) {
         }
 
         const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch subscription completed in ${duration}ms: +${successful} wallets, total: ${this.monitoredWallets.size}`);
 
         return { successful, failed, errors, totalMonitored: this.monitoredWallets.size };
     }
@@ -979,7 +865,6 @@ async processTransaction(transactionData) {
         }
 
         const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch unsubscription completed in ${duration}ms: -${successful} wallets, total: ${this.monitoredWallets.size}`);
 
         return { successful, failed: 0, errors: [], totalMonitored: this.monitoredWallets.size };
     }
@@ -987,7 +872,6 @@ async processTransaction(transactionData) {
     async subscribeToWallet(walletAddress) {
         if (!this.monitoredWallets.has(walletAddress)) {
             this.monitoredWallets.add(walletAddress);
-            console.log(`[${new Date().toISOString()}] [INFO] Added wallet ${walletAddress} to monitoring, total: ${this.monitoredWallets.size}`);
         }
         return { success: true, totalMonitored: this.monitoredWallets.size };
     }
@@ -995,14 +879,11 @@ async processTransaction(transactionData) {
     async unsubscribeFromWallet(walletAddress) {
         if (this.monitoredWallets.has(walletAddress)) {
             this.monitoredWallets.delete(walletAddress);
-            console.log(`[${new Date().toISOString()}] [INFO] Removed wallet ${walletAddress} from monitoring, total: ${this.monitoredWallets.size}`);
         }
         return { success: true, totalMonitored: this.monitoredWallets.size };
     }
 
     async removeAllWallets(groupId = null) {
-        console.log(`[${new Date().toISOString()}] [INFO] Removing all wallets for group ${groupId || 'all'}`);
-
         try {
             const walletsToRemove = await this.db.getActiveWallets(groupId);
             const addressesToRemove = walletsToRemove.map(w => w.address);
@@ -1021,7 +902,6 @@ async processTransaction(transactionData) {
                 const remainingWallets = await this.db.getActiveWallets(this.activeGroupId);
                 this.monitoredWallets.clear();
                 remainingWallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-                console.log(`[${new Date().toISOString()}] [INFO] Reloaded monitoring: ${this.monitoredWallets.size} wallets remaining`);
             }
 
             return {
@@ -1035,23 +915,19 @@ async processTransaction(transactionData) {
             };
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error removing wallets: ${error.message}`);
             throw error;
         }
     }
 
     async switchGroup(groupId) {
-        console.log(`[${new Date().toISOString()}] [INFO] Switching to group ${groupId || 'all'}`);
         try {
             this.activeGroupId = groupId;
-            console.log(`[${new Date().toISOString()}] [INFO] Active group set to ${groupId || 'all'}`);
             return {
                 success: true,
                 activeGroupId: this.activeGroupId,
                 monitoredWallets: this.monitoredWallets.size
             };
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error switching group: ${error.message}`);
             throw error;
         }
     }
@@ -1070,7 +946,6 @@ async processTransaction(transactionData) {
                 await redis.setex(cacheKey, 300, JSON.stringify(Array.from(groupWallets)));
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error fetching group wallets: ${error.message}`);
             const wallets = await this.db.getActiveWallets(groupId);
             groupWallets = new Set(wallets.map(w => w.address));
         }
@@ -1080,19 +955,16 @@ async processTransaction(transactionData) {
 
     async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached, stopping service`);
             this.isStarted = false;
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         if (this.stream) {
             try {
                 this.stream.end();
             } catch (error) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Error ending stream:`, error.message);
             }
         }
 
@@ -1102,7 +974,6 @@ async processTransaction(transactionData) {
                 else if (typeof this.client.destroy === 'function') this.client.destroy();
                 else if (typeof this.client.end === 'function') this.client.end();
             } catch (error) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Error closing client:`, error.message);
             }
             this.client = null;
         }
@@ -1118,10 +989,8 @@ async processTransaction(transactionData) {
             this.isConnecting = false;
             await this.connect();
             await this.subscribeToAllWallets();
-            console.log(`[${new Date().toISOString()}] [INFO] Reconnection successful`);
             this.reconnectAttempts = 0;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Reconnect failed: ${error.message}`);
             this.reconnectInterval = Math.min(this.reconnectInterval * 1.5, 30000);
             await this.handleReconnect();
         }
@@ -1152,8 +1021,6 @@ async processTransaction(transactionData) {
     }
 
     async stop() {
-        console.log(`[${new Date().toISOString()}] [INFO] Stopping optimized gRPC service`);
-
         this.isStarted = false;
 
         if (this.batchTimer) {
@@ -1162,7 +1029,6 @@ async processTransaction(transactionData) {
         }
 
         if (this.transactionBatch.size > 0) {
-            console.log(`[${new Date().toISOString()}] [INFO] Processing final batch of ${this.transactionBatch.size} transactions`);
             await this.processBatch();
         }
 
@@ -1170,7 +1036,6 @@ async processTransaction(transactionData) {
             try {
                 this.stream.end();
             } catch (error) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Error ending stream:`, error.message);
             }
         }
 
@@ -1180,19 +1045,14 @@ async processTransaction(transactionData) {
                 else if (typeof this.client.destroy === 'function') this.client.destroy();
                 else if (typeof this.client.end === 'function') this.client.end();
             } catch (error) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Error closing client:`, error.message);
             }
             this.client = null;
         }
 
         this.monitoredWallets.clear();
-
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service stopped`);
     }
 
     async shutdown() {
-        console.log(`[${new Date().toISOString()}] [INFO] Shutting down optimized gRPC service`);
-
         await this.stop();
 
         this.processedTransactions.clear();
@@ -1202,10 +1062,7 @@ async processTransaction(transactionData) {
         try {
             await this.db.close();
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error closing DB: ${error.message}`);
         }
-
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service shutdown complete`);
     }
 
     getPerformanceStats() {
@@ -1262,12 +1119,10 @@ async processTransaction(transactionData) {
             recentlyProcessed: this.recentlyProcessed.size
         };
 
-        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
         return { before, after };
     }
 
     clearCaches() {
-        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
         return this.forceCleanupCaches();
     }
 }
