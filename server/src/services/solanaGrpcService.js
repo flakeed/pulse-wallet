@@ -249,6 +249,25 @@ class SolanaGrpcService {
         return results;
     }
 
+async restartStream() {
+    try {
+        console.log(`[${new Date().toISOString()}] 🔄 Restarting gRPC stream`);
+        if (this.stream) {
+            this.stream.cancel();
+            this.stream = null;
+        }
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+        await this.connectStream();
+        console.log(`[${new Date().toISOString()}] ✅ gRPC stream restarted successfully`);
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Failed to restart gRPC stream:`, error.message);
+        throw error;
+    }
+}
+
     async unsubscribeFromWalletsBatch(walletAddresses) {
         if (!walletAddresses || walletAddresses.length === 0) return;
     
