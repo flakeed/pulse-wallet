@@ -3,10 +3,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 const globalTokenCache = new Map();
 const pendingRequests = new Map();
 
-const CACHE_TTL = 30000;
+const CACHE_TTL = 300000; 
 const BATCH_DELAY = 200;
 const MAX_BATCH_SIZE = 25;
-const REQUEST_TIMEOUT = 15000;
+const REQUEST_TIMEOUT = 10000;
 
 const getAuthHeaders = () => {
   const sessionToken = localStorage.getItem('sessionToken');
@@ -63,12 +63,10 @@ const processBatches = async () => {
   const allMints = Array.from(batchQueue);
   batchQueue.clear();
   
-  
   const batches = [];
   for (let i = 0; i < allMints.length; i += MAX_BATCH_SIZE) {
     batches.push(allMints.slice(i, i + MAX_BATCH_SIZE));
   }
-  
   
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
@@ -114,18 +112,16 @@ const processSingleBatch = async (mints) => {
       return;
     }
     
-    if (validMints.length > MAX_BATCH_SIZE) {
-      console.error(`[usePrices:processSingleBatch] Batch too large: ${validMints.length} > ${MAX_BATCH_SIZE}`);
-      throw new Error(`Internal error: batch size ${validMints.length} exceeds limit ${MAX_BATCH_SIZE}`);
-    }
-    
-    const requestBody = JSON.stringify({ mints: validMints });
+    const requestBody = JSON.stringify({ 
+      mints: validMints,
+      dataType: 'deployment-only' 
+    });
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
     
     try {
-      const response = await fetch('/api/tokens/batch-data', {
+      const response = await fetch('/api/tokens/deployment-time', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: requestBody,
@@ -134,17 +130,11 @@ const processSingleBatch = async (mints) => {
       
       clearTimeout(timeoutId);
       
-      
       if (!response.ok) {
         let errorMessage;
         try {
           const errorData = await response.json();
           errorMessage = errorData.error || `HTTP ${response.status}`;
-          console.error(`[usePrices:processSingleBatch] Server error:`, errorData);
-          
-          if (response.status === 400 && errorMessage.includes('Too many mints')) {
-            throw new Error(`Server rejected batch size ${validMints.length}. Please report this bug.`);
-          }
         } catch (jsonError) {
           errorMessage = `HTTP ${response.status} ${response.statusText}`;
         }
@@ -153,34 +143,42 @@ const processSingleBatch = async (mints) => {
       
       const result = await response.json();
 
-      
       if (result.success && result.data) {
         const now = Date.now();
         
         validMints.forEach(mint => {
-          const tokenData = result.data[mint] || null;
+          const deploymentData = result.data[mint] || null;
           
-          if (tokenData) {
-            const processedTokenData = {
-              ...tokenData,
+          let processedDeploymentData = null;
+          if (deploymentData && deploymentData.deploymentTime) {
+            const deployTime = new Date(deploymentData.deploymentTime);
+            const ageInHours = (Date.now() - deployTime.getTime()) / (1000 * 60 * 60);
+            
+            processedDeploymentData = {
               age: {
-                createdAt: tokenData.age?.createdAt || null,
-                ageInHours: tokenData.age?.ageInHours || null,
-                isNew: tokenData.age?.isNew || isTokenNew(tokenData.age?.ageInHours),
-                formattedAge: formatTokenAge(tokenData.age?.ageInHours)
-              }
+                createdAt: deploymentData.deploymentTime,
+                ageInHours: ageInHours,
+                isNew: isTokenNew(ageInHours),
+                formattedAge: formatTokenAge(ageInHours)
+              },
+              token: {
+                symbol: deploymentData.symbol || 'UNK',
+                name: deploymentData.name || 'Unknown Token',
+                decimals: deploymentData.decimals || 6
+              },
+              lastUpdated: new Date().toISOString(),
+              source: 'deployment_service'
             };
             
             globalTokenCache.set(`token-${mint}`, {
-              data: processedTokenData,
+              data: processedDeploymentData,
               timestamp: now
             });
-            
           }
           
           const pending = pendingRequests.get(mint);
           if (pending) {
-            pending.forEach(({ resolve }) => resolve(tokenData));
+            pending.forEach(({ resolve }) => resolve(processedDeploymentData));
             pendingRequests.delete(mint);
           }
         });
@@ -198,10 +196,10 @@ const processSingleBatch = async (mints) => {
   }
 };
 
-const queueTokenData = (mint) => {
+const queueTokenDeploymentData = (mint) => {
   return new Promise((resolve, reject) => {
     if (!mint || typeof mint !== 'string' || mint.length < 32) {
-      console.warn(`[usePrices:queueTokenData] Invalid mint: ${mint}`);
+      console.warn(`[usePrices:queueTokenDeploymentData] Invalid mint: ${mint}`);
       resolve(null);
       return;
     }
@@ -219,7 +217,6 @@ const queueTokenData = (mint) => {
     
     batchQueue.add(mint);
     
-    
     if (batchTimer) {
       clearTimeout(batchTimer);
     }
@@ -233,81 +230,19 @@ const queueTokenData = (mint) => {
 };
 
 export const useSolPrice = () => {
-  const [solPrice, setSolPrice] = useState(null);
+  const [solPrice, setSolPrice] = useState(150); 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const isMountedRef = useRef(true);
 
   const fetchSolPrice = useCallback(async () => {
-    const cached = globalTokenCache.get('sol-price');
-    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-      if (isMountedRef.current) {
-        setSolPrice(cached.data.price);
-      }
-      return cached.data.price;
+    if (isMountedRef.current) {
+      setSolPrice(150);
+      setError(null);
+      setLoading(false);
     }
-
-    if (loading) return solPrice;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      
-      try {
-        const response = await fetch('/api/solana/price', {
-          headers: getAuthHeaders(),
-          signal: controller.signal
-        });
-        
-        clearTimeout(timeoutId);
-        
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-        
-        if (data.success || data.price) {
-          const price = data.price || 150;
-          
-          globalTokenCache.set('sol-price', {
-            data: { price, ...data },
-            timestamp: Date.now()
-          });
-
-          if (isMountedRef.current) {
-            setSolPrice(price);
-            setError(null);
-          }
-          return price;
-        } else {
-          throw new Error(data.error || 'Failed to fetch SOL price');
-        }
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        err = new Error('SOL price request timeout');
-      }
-      
-      logError('useSolPrice', err);
-      if (isMountedRef.current) {
-        setError(err.message);
-        setSolPrice(150);
-      }
-      return 150;
-    } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [loading, solPrice]);
+    return 150;
+  }, []);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -362,14 +297,11 @@ export const useTokenData = (tokenMint) => {
     setError(null);
 
     try {
-      const result = await queueTokenData(tokenMint);
+      const result = await queueTokenDeploymentData(tokenMint);
       
       if (isMountedRef.current) {
         setTokenData(result);
         setError(null);
-        
-        if (result && result.age) {
-        }
       }
       return result;
     } catch (err) {
@@ -419,14 +351,14 @@ export const useTokenPrice = (tokenMint) => {
   const { tokenData, loading, error, refetch } = useTokenData(tokenMint);
   
   const priceData = tokenData ? {
-    price: tokenData.price,
-    change24h: tokenData.change24h || 0,
-    volume24h: tokenData.volume24h || 0,
-    liquidity: tokenData.liquidity || 0,
-    marketCap: tokenData.marketCap,
-    priceInSol: tokenData.priceInSol,
-    pools: tokenData.pools,
-    bestPool: tokenData.bestPool,
+    price: 0,
+    change24h: 0,
+    volume24h: 0,
+    liquidity: 0,
+    marketCap: 0,
+    priceInSol: 0,
+    pools: null,
+    bestPool: null,
     ageInHours: tokenData.age?.ageInHours,
     isNew: tokenData.age?.isNew,
     formattedAge: tokenData.age?.formattedAge,
@@ -442,13 +374,13 @@ export const usePrices = (tokenMint = null) => {
   const { tokenData, loading: tokenLoading, error: tokenError } = useTokenData(tokenMint);
 
   const tokenPrice = tokenData ? {
-    price: tokenData.price,
+    price: 0,
     change24h: 0,
-    volume24h: tokenData.volume24h || 0,
-    liquidity: tokenData.liquidity || 0,
-    marketCap: tokenData.marketCap,
-    priceInSol: tokenData.priceInSol,
-    pools: tokenData.pools,
+    volume24h: 0,
+    liquidity: 0,
+    marketCap: 0,
+    priceInSol: 0,
+    pools: null,
     ageInHours: tokenData.age?.ageInHours,
     isNew: tokenData.age?.isNew,
     formattedAge: tokenData.age?.formattedAge,

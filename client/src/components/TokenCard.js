@@ -1,36 +1,38 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { useTokenData, useSolPrice } from '../hooks/usePrices';
-import { calculateTokenPnL, formatPnL, getPnLColor, formatNumber } from '../utils/pnlCalculator';
+import React, { useState, useMemo } from 'react';
+import { useTokenData } from '../hooks/usePrices';
+import { formatPnL, getPnLColor } from '../utils/pnlCalculator';
 
 function TokenCard({ token, onOpenChart }) {
   const [showDetails, setShowDetails] = useState(true);
   const [showAllWallets, setShowAllWallets] = useState(false);
-  const { solPrice, loading: solLoading } = useSolPrice();
   const { tokenData: data, loading, error } = useTokenData(token.mint);
 
   const WALLETS_DISPLAY_LIMIT = 3;
 
+  // Simple PnL calculation without price data
   const groupPnL = useMemo(() => {
-    if (!data || !data.price || !solPrice || loading) {
-      return null;
+    if (!token.wallets || token.wallets.length === 0) {
+      return {
+        totalPnLSOL: 0,
+        totalSpentSOL: 0,
+        totalReceivedSOL: 0
+      };
     }
 
-    
-    const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
-    
-    const PnL = {
-      ...calculatedPnL,
-      realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
-      unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
-      currentPriceUSD: data.price,
-      currentPriceSOL: data.priceInSol || (data.price / solPrice),
-      marketCap: data.marketCap,
-      holdingPercentage: 100 - calculatedPnL.soldPercentage
-    };
+    let totalSpentSOL = 0;
+    let totalReceivedSOL = 0;
 
-    
-    return PnL;
-  }, [data, solPrice, token.wallets, loading, token.symbol]);
+    token.wallets.forEach(wallet => {
+      totalSpentSOL += Number(wallet.solSpent || 0);
+      totalReceivedSOL += Number(wallet.solReceived || 0);
+    });
+
+    return {
+      totalPnLSOL: totalReceivedSOL - totalSpentSOL,
+      totalSpentSOL,
+      totalReceivedSOL
+    };
+  }, [token.wallets]);
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -89,16 +91,14 @@ function TokenCard({ token, onOpenChart }) {
     setShowAllWallets(false);
   };
 
-  const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  const netColor = getPnLColor(groupPnL.totalPnLSOL);
   
   const isNewToken = data?.age?.isNew || false;
   const tokenAge = data?.age || null;
   const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
   const deploymentTime = tokenAge?.createdAt;
 
-  const displayPnL = groupPnL?.totalPnLSOL || 0;
-  const displayPrice = data?.price || 0;
-  const displayMarketCap = data?.marketCap || 0;
+  const displayPnL = groupPnL.totalPnLSOL || 0;
 
   const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
@@ -138,25 +138,20 @@ function TokenCard({ token, onOpenChart }) {
               <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
                 {formattedAge}
               </span>
+              {loading && (
+                <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent"></div>
+              )}
             </div>
           </div>
 
           <div className="text-right">
             <div className={`text-sm font-bold ${netColor} flex items-center`}>
-              {(loading || solLoading) && (
-                <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
-              )}
               {formatPnL(displayPnL)}
             </div>
             
             <div className="text-xs text-gray-500">
               {token.summary.uniqueWallets}W · {token.summary.totalBuys}B · {token.summary.totalSells}S
             </div>
-            {!loading && displayPrice > 0 && (
-              <div className="text-xs text-blue-400">
-                ${formatNumber(displayPrice, 8)} · MC: ${formatNumber(displayMarketCap)}
-              </div>
-            )}
           </div>
         </div>
 
@@ -186,37 +181,8 @@ function TokenCard({ token, onOpenChart }) {
 
       {showDetails && (
         <div className="p-3 bg-gray-800/50">
-          {/* {loading && (
-            <div className="flex items-center justify-center py-4">
-              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mr-3"></div>
-              <span className="text-gray-400">Loading data...</span>
-            </div>
-          )} */}
-
-          {/* {error && !loading && (
-            <div className="bg-red-900/20 border border-red-700 rounded p-2 mb-3">
-              <div className="text-red-400 text-sm">Failed to load data</div>
-              <div className="text-red-300 text-xs">{error}</div>
-            </div>
-          )} */}
-
           {data && !loading && (
             <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
-              {/* <div>
-                <div className="text-gray-400 mb-1">Price</div>
-                <div className="text-white font-medium">
-                  ${displayPrice?.toFixed(8) || 'N/A'}
-                  <div className="text-gray-500 text-xs">
-                    {data.priceInSol?.toFixed(8) || 'N/A'} SOL
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Market Cap</div>
-                <div className="text-white font-medium">
-                  ${formatNumber(displayMarketCap)}
-                </div>
-              </div> */}
               <div>
                 <div className="text-gray-400 mb-1">Age</div>
                 <div className="text-white font-medium">
@@ -231,46 +197,32 @@ function TokenCard({ token, onOpenChart }) {
                   )}
                 </div>
               </div>
+              <div>
+                <div className="text-gray-400 mb-1">Token Info</div>
+                <div className="text-white font-medium">
+                  {data.token?.symbol || token.symbol || 'UNK'}
+                  <div className="text-gray-500 text-xs truncate">
+                    {data.token?.name || token.name || 'Unknown Token'}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
-          {/* {groupPnL && (
-            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
-              <div>
-                <div className="text-gray-400 mb-1">Holdings</div>
-                <div className="text-white font-medium">
-                  {formatNumber(groupPnL.currentHoldings, 0)} tokens
-                  <span className="text-gray-500 ml-1">
-                    ({groupPnL.holdingPercentage.toFixed(1)}%)
-                  </span>
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Total Spent/Received</div>
-                <div className="text-white font-medium">
-                  {groupPnL.totalSpentSOL.toFixed(4)} / {groupPnL.totalReceivedSOL.toFixed(4)} SOL
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Realized PnL</div>
-                <div className={`font-medium ${getPnLColor(groupPnL.realizedPnLSOL)}`}>
-                  {formatPnL(groupPnL.realizedPnLSOL)}
-                  <div className="text-xs text-gray-500">
-                    ${formatNumber(groupPnL.realizedPnLUSD)}
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="text-gray-400 mb-1">Unrealized PnL</div>
-                <div className={`font-medium ${getPnLColor(groupPnL.unrealizedPnLSOL)}`}>
-                  {formatPnL(groupPnL.unrealizedPnLSOL)}
-                  <div className="text-xs text-gray-500">
-                    ${formatNumber(groupPnL.unrealizedPnLUSD)}
-                  </div>
-                </div>
+          <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+            <div>
+              <div className="text-gray-400 mb-1">Total Spent</div>
+              <div className="text-white font-medium">
+                {groupPnL.totalSpentSOL.toFixed(4)} SOL
               </div>
             </div>
-          )} */}
+            <div>
+              <div className="text-gray-400 mb-1">Total Received</div>
+              <div className="text-white font-medium">
+                {groupPnL.totalReceivedSOL.toFixed(4)} SOL
+              </div>
+            </div>
+          </div>
 
           <div className="space-y-1">
             <div className="flex items-center justify-between text-gray-400 text-xs mb-2">
@@ -283,8 +235,7 @@ function TokenCard({ token, onOpenChart }) {
             </div>
             
             {walletsToShow.map((wallet, index) => {
-              const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
-              const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
+              const walletPnL = (wallet.solReceived || 0) - (wallet.solSpent || 0);
               
               return (
                 <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
@@ -316,8 +267,8 @@ function TokenCard({ token, onOpenChart }) {
                       </svg>
                     </button>
                   </div>
-                  <div className={`font-medium ${getPnLColor(displayWalletPnL)}`}>
-                    {formatPnL(displayWalletPnL)}
+                  <div className={`font-medium ${getPnLColor(walletPnL)}`}>
+                    {formatPnL(walletPnL)}
                   </div>
                 </div>
               );
