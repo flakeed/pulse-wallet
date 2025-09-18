@@ -569,17 +569,21 @@ async handleReconnect() {
         return;
     }
 
+    this.isConnecting = true;
     this.reconnectAttempts++;
     const backoffDelay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1);
     console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${backoffDelay}ms, Current wallets: ${this.monitoredWallets.size}`);
 
-    await new Promise(resolve => setTimeout(resolve, backoffDelay));
     try {
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
         await this.connectStream();
         await this.subscribeToWallets();
         console.log(`[${new Date().toISOString()}] ✅ Reconnect successful`);
+        this.reconnectAttempts = 0;
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message);
+        console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message, { stack: error.stack });
+    } finally {
+        this.isConnecting = false;
     }
 }
 
