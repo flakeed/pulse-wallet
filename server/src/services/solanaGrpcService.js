@@ -59,12 +59,29 @@ async connectStream() {
             this.stream = null;
         }
 
-        const validWallets = Array.from(this.monitoredWallets).filter(
-            wallet => typeof wallet === 'string' && wallet.length > 0
-        );
+        const validWallets = Array.from(this.monitoredWallets).filter(wallet => {
+            if (typeof wallet !== 'string' || wallet.length === 0) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid wallet: ${wallet}`);
+                return false;
+            }
+            try {
+                new PublicKey(wallet);
+                return true;
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid Solana address: ${wallet}, Error: ${error.message}`);
+                return false;
+            }
+        });
+
         if (validWallets.length !== this.monitoredWallets.size) {
             console.warn(`[${new Date().toISOString()}] ⚠️ Removed ${this.monitoredWallets.size - validWallets.length} invalid wallets from monitoredWallets`);
             this.monitoredWallets = new Set(validWallets);
+        }
+
+        if (validWallets.length === 0) {
+            console.log(`[${new Date().toISOString()}] ⚠️ No valid wallets to subscribe to`);
+            this.isConnecting = false;
+            return;
         }
 
         const request = {
@@ -110,7 +127,7 @@ async connectStream() {
     } catch (error) {
         console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message);
         this.isConnecting = false;
-        throw error;
+        this.handleReconnect();
     }
 }
 
@@ -554,12 +571,13 @@ async handleReconnect() {
 
     this.reconnectAttempts++;
     const backoffDelay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1);
-    console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${backoffDelay}ms`);
+    console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${backoffDelay}ms, Current wallets: ${this.monitoredWallets.size}`);
 
     await new Promise(resolve => setTimeout(resolve, backoffDelay));
     try {
         await this.connectStream();
         await this.subscribeToWallets();
+        console.log(`[${new Date().toISOString()}] ✅ Reconnect successful`);
     } catch (error) {
         console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message);
     }
