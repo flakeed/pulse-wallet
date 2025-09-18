@@ -1,11 +1,24 @@
 import React from 'react';
-import { formatPnL, getPnLColor } from '../utils/pnlCalculator';
+import { usePrices } from '../hooks/usePrices';
+import { calculateWalletPnL, formatPnL, getPnLColor } from '../utils/pnlCalculator';
 
 function WalletPill({ wallet, tokenMint }) {
     const label = wallet.name || `${wallet.address.slice(0, 4)}...${wallet.address.slice(-4)}`;
-    
-    // Simple PnL calculation without price data
-    const calculatedPnL = (wallet.solReceived || 0) - (wallet.solSpent || 0);
+    const { solPrice, tokenPrice, loading, error, ready } = usePrices(tokenMint);
+
+
+
+    const calculatedPnL = React.useMemo(() => {
+        if (!tokenMint || !ready || !solPrice || !tokenPrice?.price) {
+            return wallet.pnlSol || 0;
+        }
+
+        
+        const walletPnL = calculateWalletPnL(wallet, tokenPrice.price, solPrice);
+        
+        
+        return walletPnL.totalPnLSOL;
+    }, [tokenMint, ready, solPrice, tokenPrice?.price, wallet, label]);
 
     const openGmgnTokenWithMaker = () => {
         if (!tokenMint || !wallet.address) return;
@@ -42,13 +55,17 @@ function WalletPill({ wallet, tokenMint }) {
                     </div>
                     <div className="text-gray-500 text-xs">
                         {wallet.txBuys}B · {wallet.txSells}S
+                        {error && <span className="text-red-500 ml-1" title={error}>⚠</span>}
                     </div>
                 </div>
             </div>
 
             <div className="flex items-center space-x-2">
                 <div className="text-right">
-                    <div className={`text-xs font-semibold ${getPnLColor(calculatedPnL)}`}>
+                    <div className={`text-xs font-semibold ${getPnLColor(calculatedPnL)} flex items-center`}>
+                        {loading && tokenMint ? (
+                            <div className="animate-spin rounded-full h-2 w-2 border border-gray-400 border-t-transparent mr-1"></div>
+                        ) : null}
                         {formatPnL(calculatedPnL)}
                     </div>
                     <div className="text-gray-500 text-xs">
