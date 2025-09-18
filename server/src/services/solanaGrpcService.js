@@ -164,16 +164,16 @@ class SolanaGrpcService {
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
-createAllStreams
         console.log(`[${new Date().toISOString()}] [INFO] All streams created successfully. Total streams: ${this.streams.length}`);
     }
 
-    async createSingleStream(chunkWallets) {
-        if (chunkWallets.size === 0) return;
+async createSingleStream(chunkWallets) {
+    if (chunkWallets.size === 0) return;
 
-        try {
-            console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for chunk of ${chunkWallets.size} wallets`);
-const client = new Client(this.grpcEndpoint, undefined, {
+    try {
+        console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for chunk of ${chunkWallets.size} wallets (stream ${this.streams.length + 1}/${Math.ceil(this.allMonitoredWallets.size / this.chunkSize)})`);
+        
+        const client = new Client(this.grpcEndpoint, undefined, {
             'grpc.keepalive_time_ms': 30000,
             'grpc.keepalive_timeout_ms': 5000,
             'grpc.keepalive_permit_without_calls': true,
@@ -186,57 +186,58 @@ const client = new Client(this.grpcEndpoint, undefined, {
             'grpc.keepalive_without_calls': true                 
         });
 
-            const stream = await client.subscribe();
-            stream.on('data', data => {
-                this.messageCount++;
-                this.handleGrpcMessageBatched(data);
-            });
-            stream.on('error', error => {
-                console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error for chunk ${chunkWallets.size}: ${error.message}`);
-                this.handleSingleStreamReconnect(stream, client, chunkWallets);
-            });
-            stream.on('end', () => {
-                console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended for chunk ${chunkWallets.size}`);
-                if (this.isStarted) setTimeout(() => this.handleSingleStreamReconnect(stream, client, chunkWallets), 2000);
-            });
+        const stream = await client.subscribe();
+        stream.on('data', data => {
+            this.messageCount++;
+            this.handleGrpcMessageBatched(data);
+        });
+        stream.on('error', error => {
+            console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error for chunk ${chunkWallets.size}: ${error.message}`);
+            this.handleSingleStreamReconnect(stream, client, chunkWallets);
+        });
+        stream.on('end', () => {
+            console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended for chunk ${chunkWallets.size}`);
+            if (this.isStarted) setTimeout(() => this.handleSingleStreamReconnect(stream, client, chunkWallets), 2000);
+        });
 
-            const request = {
-                accounts: {},
-                slots: {},
-                transactions: {
-                    client: {
-                        vote: false,
-                        failed: false,
-                        accountInclude: Array.from(chunkWallets),
-                        accountExclude: [],
-                        accountRequired: []
-                    }
-                },
-                transactionsStatus: {},
-                entry: {},
-                blocks: {},
-                blocksMeta: {},
-                commitment: CommitmentLevel.CONFIRMED,
-                accountsDataSlice: []
-            };
-
-            console.log(`[${new Date().toISOString()}] [INFO] Sending subscription for chunk of ${chunkWallets.size} wallets`);
-            await new Promise((resolve, reject) => stream.write(request, err => {
-                if (err) {
-                    console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed for chunk ${chunkWallets.size}: ${err.message}`);
-                    reject(err);
-                } else {
-                    console.log(`[${new Date().toISOString()}] [INFO] Subscription sent for chunk of ${chunkWallets.size} wallets`);
-                    resolve();
+        const request = {
+            accounts: {},
+            slots: {},
+            transactions: {
+                client: {
+                    vote: false,
+                    failed: false,
+                    accountInclude: Array.from(chunkWallets),
+                    accountExclude: [],
+                    accountRequired: []
                 }
-            }));
+            },
+            transactionsStatus: {},
+            entry: {},
+            blocks: {},
+            blocksMeta: {},
+            commitment: CommitmentLevel.CONFIRMED,
+            accountsDataSlice: []
+        };
 
-            this.streams.push({ client, stream, chunk: chunkWallets });
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream for chunk ${chunkWallets.size}: ${error.message}`);
-            throw error;
-        }
+        console.log(`[${new Date().toISOString()}] [INFO] Sending subscription for chunk of ${chunkWallets.size} wallets (stream ${this.streams.length + 1})`);
+        
+        await new Promise((resolve, reject) => stream.write(request, err => {
+            if (err) {
+                console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed for chunk ${chunkWallets.size}: ${err.message}`);
+                reject(err);
+            } else {
+                console.log(`[${new Date().toISOString()}] [INFO] Subscription sent for chunk of ${chunkWallets.size} wallets`);
+                resolve();
+            }
+        }));
+
+        this.streams.push({ client, stream, chunk: chunkWallets });
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream for chunk ${chunkWallets.size}: ${error.message}`);
+        throw error;
     }
+}
 
     async endAllStreams() {
         for (const { stream, client } of this.streams) {
@@ -1016,31 +1017,32 @@ const client = new Client(this.grpcEndpoint, undefined, {
         }
     }
 
-    getStatus() {
-        return {
-            isConnected: this.streams.length > 0 && this.streams.every(s => s.stream !== null),
-            isStarted: this.isStarted,
-            activeGroupId: this.activeGroupId,
-            totalSubscriptions: this.allMonitoredWallets.size,
-            numStreams: this.streams.length,
-            messageCount: this.messageCount,
-            reconnectAttempts: this.reconnectAttempts,
-            grpcEndpoint: this.grpcEndpoint,
-            chunkSize: this.chunkSize,
-            mode: 'optimized_grpc_sharded',
-            performance: {
-                processedTransactions: this.processedTransactions.size,
-                recentlyProcessed: this.recentlyProcessed.size,
-                batchSize: this.batchSize,
-                batchTimeout: this.batchTimeout,
-                solPriceCached: this.solPriceCache.lastUpdated > 0,
-                cacheStats: {
-                    solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
-                    solPrice: this.solPriceCache.price
-                }
+getStatus() {
+    return {
+        isConnected: this.streams.length > 0 && this.streams.every(s => s.stream !== null),
+        isStarted: this.isStarted,
+        activeGroupId: this.activeGroupId,
+        totalSubscriptions: this.allMonitoredWallets.size,
+        numStreams: this.streams.length,
+        chunkSize: this.chunkSize,
+        averageWalletsPerStream: this.allMonitoredWallets.size / Math.max(1, this.streams.length),
+        messageCount: this.messageCount,
+        reconnectAttempts: this.reconnectAttempts,
+        grpcEndpoint: this.grpcEndpoint,
+        mode: 'optimized_grpc_sharded',
+        performance: {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size,
+            batchSize: this.batchSize,
+            batchTimeout: this.batchTimeout,
+            solPriceCached: this.solPriceCache.lastUpdated > 0,
+            cacheStats: {
+                solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
+                solPrice: this.solPriceCache.price
             }
-        };
-    }
+        }
+    };
+}
 
     async stop() {
         console.log(`[${new Date().toISOString()}] [INFO] Stopping optimized gRPC service`);
