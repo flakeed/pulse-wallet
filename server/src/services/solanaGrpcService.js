@@ -161,34 +161,63 @@ async processTransaction(transactionData) {
         } else if (transactionData.transaction && transactionData.meta) {
             transaction = transactionData.transaction;
             meta = transactionData.meta;
+        } else if (transactionData.signatures && transactionData.message) {
+            transaction = meta = transactionData;
+        } else if (transactionData.tx) {
+            transaction = transactionData.tx.transaction || transactionData.tx;
+            meta = transactionData.tx.meta || transactionData.meta;
+        } else if (transactionData.slot || transactionData.blockTime) {
+            transaction = transactionData.transaction || transactionData;
+            meta = transactionData.meta || transactionData;
         } else {
             console.warn(`[${new Date().toISOString()}] [WARN] Unknown transaction format, skipping`);
             return;
         }
 
-        if (!transaction || !meta || meta.err) {
-            return; 
+        if (!transaction || !meta) {
+            console.warn(`[${new Date().toISOString()}] [WARN] Missing transaction or meta data, skipping`);
+            return;
         }
 
-        const signature = this.extractSignature(transactionData);
-        if (!signature || this.processedTransactions.has(signature)) {
+        if (meta.err) {
+            console.log(`[${new Date().toISOString()}] [INFO] Skipping failed transaction with error: ${JSON.stringify(meta.err)}`);
+            return;
+        }
+
+        const signature = this.extractSignature(transactionData) || transactionData.signature;
+        if (!signature) {
+            console.warn(`[${new Date().toISOString()}] [WARN] No signature found, skipping`);
+            return;
+        }
+
+        if (this.processedTransactions.has(signature)) {
+            console.log(`[${new Date().toISOString()}] [INFO] Transaction already processed: signature=${signature}`);
             return;
         }
         this.processedTransactions.add(signature);
+
+        console.log(`[${new Date().toISOString()}] [INFO] Starting processing transaction: signature=${signature}`);
 
         let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
         if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
         if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
 
         const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
-        const involvedWallet = Array.from(this.monitoredWallets).find(wallet => 
-            stringAccountKeys.includes(wallet)
-        );
 
-        if (!involvedWallet) return;
+        const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
+        if (!involvedWallet) {
+            console.log(`[${new Date().toISOString()}] [INFO] No monitored wallet in transaction, skipping: signature=${signature}`);
+            return;
+        }
 
         const wallet = await this.db.getWalletByAddress(involvedWallet);
-        if (!wallet || (this.activeGroupId && wallet.group_id !== this.activeGroupId)) {
+        if (!wallet) {
+            console.warn(`[${new Date().toISOString()}] [WARN] Wallet not found in DB: ${involvedWallet}, signature=${signature}`);
+            return;
+        }
+
+        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+            console.log(`[${new Date().toISOString()}] [INFO] Wallet group mismatch, skipping: signature=${signature}`);
             return;
         }
 
@@ -203,8 +232,9 @@ async processTransaction(transactionData) {
             accountKeys: stringAccountKeys
         });
 
+        console.log(`[${new Date().toISOString()}] [INFO] Transaction processed and sent to webhook: signature=${signature}`);
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction:`, error.message);
+        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`, error.stack);
     }
 }
 
@@ -281,6 +311,7 @@ async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, 
         });
 
         if (savedTransaction) {
+            const { redis } = require('./tokenService');
             const transactionMessage = {
                 signature,
                 walletAddress: wallet.address,
@@ -314,9 +345,99 @@ async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, 
     }
 }
 
+async saveTransactionToDb({ wallet, signature, blockTime, transactionType, totalSolAmount, tokenChanges, solPrice }) {
+    try {
+        return await this.db.withTransaction(async (client) => {
+            const transactionQuery = `
+                INSERT INTO transactions (
+                    wallet_id, signature, block_time, transaction_type,
+                    sol_spent, sol_received, usd_spent, usd_received
+                ) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id, signature, transaction_type
+            `;
+            
+            const transactionResult = await client.query(transactionQuery, [
+                wallet.id,
+                signature,
+                new Date(blockTime * 1000).toISOString(),
+                transactionType,
+                transactionType === 'buy' ? totalSolAmount : 0,
+                transactionType === 'sell' ? totalSolAmount : 0,
+                0,
+                0
+            ]);
+
+            if (transactionResult.rows.length === 0) {
+                return null;
+            }
+
+            const transaction = transactionResult.rows[0];
+
+            for (const tokenChange of tokenChanges) {
+                await this.saveTokenOperationInTransaction(
+                    client, 
+                    transaction.id, 
+                    tokenChange, 
+                    transactionType
+                );
+            }
+
+            return {
+                signature: signature,
+                type: transactionType,
+                solAmount: totalSolAmount,
+                tokensChanged: tokenChanges,
+            };
+        });
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error saving transaction to DB:`, error.message);
+        throw error;
+    }
+}
+
+async saveTokenOperationInTransaction(client, transactionId, tokenChange, transactionType) {
+    try {
+        const tokenUpsertQuery = `
+            INSERT INTO tokens (mint, symbol, name, decimals) 
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (mint) DO UPDATE SET
+                symbol = EXCLUDED.symbol,
+                name = EXCLUDED.name,
+                decimals = EXCLUDED.decimals,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+        `;
+        
+        const tokenResult = await client.query(tokenUpsertQuery, [
+            tokenChange.mint,
+            tokenChange.symbol,
+            tokenChange.name,
+            tokenChange.decimals,
+        ]);
+
+        const tokenId = tokenResult.rows[0].id;
+
+        const operationQuery = `
+            INSERT INTO token_operations (transaction_id, token_id, amount, operation_type) 
+            VALUES ($1, $2, $3, $4)
+        `;
+        
+        await client.query(operationQuery, [
+            transactionId, 
+            tokenId, 
+            tokenChange.amount, 
+            transactionType
+        ]);
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error saving token operation:`, error.message);
+        throw error;
+    }
+}
+
 async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
     const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-    const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
     
     let transactionType = null;
     let totalSolAmount = 0;
@@ -361,6 +482,108 @@ async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
     );
 
     return { transactionType, totalSolAmount, tokenChanges };
+}
+
+async analyzeTokenChangesFromGrpc(meta, transactionType, walletAddress) {
+    const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
+    const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const tokenChanges = [];
+
+    const allBalanceChanges = new Map();
+    
+    for (const pre of meta.preTokenBalances || []) {
+        const key = `${pre.mint}-${pre.accountIndex}`;
+        allBalanceChanges.set(key, {
+            mint: pre.mint,
+            accountIndex: pre.accountIndex,
+            owner: pre.owner,
+            preAmount: pre.uiTokenAmount.amount,
+            preUiAmount: pre.uiTokenAmount.uiAmount,
+            postAmount: '0',
+            postUiAmount: 0,
+            decimals: pre.uiTokenAmount.decimals
+        });
+    }
+
+    for (const post of meta.postTokenBalances || []) {
+        const key = `${post.mint}-${post.accountIndex}`;
+        if (allBalanceChanges.has(key)) {
+            const existing = allBalanceChanges.get(key);
+            existing.postAmount = post.uiTokenAmount.amount;
+            existing.postUiAmount = post.uiTokenAmount.uiAmount;
+        } else {
+            allBalanceChanges.set(key, {
+                mint: post.mint,
+                accountIndex: post.accountIndex,
+                owner: post.owner,
+                preAmount: '0',
+                preUiAmount: 0,
+                postAmount: post.uiTokenAmount.amount,
+                postUiAmount: post.uiTokenAmount.uiAmount,
+                decimals: post.uiTokenAmount.decimals
+            });
+        }
+    }
+
+    const mintChanges = new Map();
+    for (const [key, change] of allBalanceChanges) {
+        if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT) {
+            continue;
+        }
+
+        if (change.owner !== walletAddress) {
+            continue;
+        }
+
+        const rawChange = Number(change.postAmount) - Number(change.preAmount);
+
+        let isValidChange = false;
+        if (transactionType === 'buy' && rawChange > 0) {
+            isValidChange = true;
+        } else if (transactionType === 'sell' && rawChange < 0) {
+            isValidChange = true;
+        }
+
+        if (isValidChange) {
+            if (mintChanges.has(change.mint)) {
+                const existing = mintChanges.get(change.mint);
+                existing.totalRawChange += Math.abs(rawChange);
+            } else {
+                mintChanges.set(change.mint, {
+                    mint: change.mint,
+                    decimals: change.decimals,
+                    totalRawChange: Math.abs(rawChange)
+                });
+            }
+        }
+    }
+
+    if (mintChanges.size === 0) {
+        return [];
+    }
+
+    const mints = Array.from(mintChanges.keys());
+    const { batchFetchTokenMetadata } = require('./tokenService');
+    const tokenInfos = await batchFetchTokenMetadata(mints, this.monitoringService.connection);
+
+    for (const [mint, aggregatedChange] of mintChanges) {
+        const tokenInfo = tokenInfos.get(mint) || {
+            symbol: mint.slice(0, 4).toUpperCase(),
+            name: `Token ${mint.slice(0, 8)}...`,
+            decimals: aggregatedChange.decimals,
+        };
+
+        tokenChanges.push({
+            mint: mint,
+            amount: aggregatedChange.totalRawChange / Math.pow(10, aggregatedChange.decimals),
+            rawChange: aggregatedChange.totalRawChange,
+            decimals: aggregatedChange.decimals,
+            symbol: tokenInfo.symbol,
+            name: tokenInfo.name,
+        });
+    }
+
+    return tokenChanges;
 }
 
 extractSignature(transactionData) {
