@@ -193,17 +193,10 @@ async handleGrpcMessage(data) {
     try {
         if (this.messageCount <= 10) {
             console.log(`[${new Date().toISOString()}] 🔍 DEBUG: gRPC message #${this.messageCount} structure:`, JSON.stringify(Object.keys(data || {}), null, 2));
-            
-            if (data) {
-                const fields = ['transaction', 'transactions', 'tx', 'txn', 'data', 'message'];
-                for (const field of fields) {
-                    if (data[field]) {
-                        console.log(`[${new Date().toISOString()}] 🔍 Found field '${field}':`, JSON.stringify(Object.keys(data[field]), null, 2));
-                    }
-                }
-                
-                if (this.messageCount <= 3) {
-                    console.log(`[${new Date().toISOString()}] 🔍 FULL DATA STRUCTURE:`, JSON.stringify(data, null, 2));
+            if (data.transaction) {
+                console.log(`[${new Date().toISOString()}] 🔍 FULL data.transaction:`, JSON.stringify(data.transaction, null, 2));
+                if (data.transaction.transaction) {
+                    console.log(`[${new Date().toISOString()}] 🔍 FULL data.transaction.transaction:`, JSON.stringify(data.transaction.transaction, null, 2));
                 }
             }
         }
