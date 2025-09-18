@@ -200,50 +200,118 @@ async subscribeToTransactions() {
     }
 async processTransaction(transactionData) {
     try {
-        const transaction = transactionData.transaction;
-        const meta = transactionData.meta;
+        if (this.messageCount <= 5) {
+            console.log(`[${new Date().toISOString()}] 🔍 DEBUG: Transaction data structure:`, JSON.stringify(Object.keys(transactionData || {}), null, 2));
+        }
         
-        if (!transaction || !meta) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no transaction or meta data`);
+        let transaction = null;
+        let meta = null;
+        
+        if (transactionData.transaction && transactionData.meta) {
+            transaction = transactionData.transaction;
+            meta = transactionData.meta;
+            console.log(`[${new Date().toISOString()}] ✅ Using format: transactionData.transaction + transactionData.meta`);
+        }
+        else if (transactionData.signatures && transactionData.message) {
+            transaction = transactionData;
+            meta = transactionData.meta || transactionData;
+            console.log(`[${new Date().toISOString()}] ✅ Using format: direct transaction object`);
+        }
+        else if (transactionData.tx) {
+            transaction = transactionData.tx.transaction || transactionData.tx;
+            meta = transactionData.tx.meta || transactionData.meta;
+            console.log(`[${new Date().toISOString()}] ✅ Using format: transactionData.tx`);
+        }
+        else if (transactionData.slot || transactionData.blockTime) {
+            transaction = transactionData.transaction || transactionData;
+            meta = transactionData.meta || transactionData;
+            console.log(`[${new Date().toISOString()}] ✅ Using format: full transaction object`);
+        }
+        else {
+            if (this.messageCount <= 10) {
+                console.log(`[${new Date().toISOString()}] ⚠️ Unknown transaction format. Keys:`, Object.keys(transactionData || {}));
+                console.log(`[${new Date().toISOString()}] 🔍 Sample data:`, JSON.stringify(transactionData, null, 2));
+            }
+            return;
+        }
+        
+        if (!transaction) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no transaction data found`);
+            return;
+        }
+        
+        if (!meta) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no meta data found`);
             return;
         }
         
         if (meta.err) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: transaction failed with error:`, meta.err);
+            if (this.messageCount <= 5) {
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping: transaction failed with error:`, meta.err);
+            }
             return;
         }
         
-        const signature = transaction.signatures[0];
+        let signature = null;
+        if (transaction.signatures && transaction.signatures.length > 0) {
+            signature = transaction.signatures[0];
+        } else if (transaction.signature) {
+            signature = transaction.signature;
+        } else if (transactionData.signature) {
+            signature = transactionData.signature;
+        }
+        
+        if (!signature) {
+            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no signature found`);
+            return;
+        }
+        
+        if (typeof signature !== 'string') {
+            if (Buffer.isBuffer(signature)) {
+                signature = signature.toString('base64');
+            } else {
+                signature = signature.toString();
+            }
+        }
+        
         if (this.processedTransactions.has(signature)) {
             return;
         }
         this.processedTransactions.add(signature);
         
+        console.log(`[${new Date().toISOString()}] 🎯 Processing transaction with signature: ${signature.slice(0, 8)}...`);
+        
         let accountKeys = [];
-        if (transaction.message.accountKeys) {
-            accountKeys = transaction.message.accountKeys.map(key => {
-                if (typeof key === 'string') {
-                    return key;
-                } else if (Buffer.isBuffer(key)) {
-                    try {
-                        const { PublicKey } = require('@solana/web3.js');
-                        return new PublicKey(key).toString();
-                    } catch (e) {
-                        return Buffer.from(key).toString('base64');
-                    }
-                } else {
-                    return key.toString();
-                }
-            });
+        if (transaction.message && transaction.message.accountKeys) {
+            accountKeys = transaction.message.accountKeys;
+        } else if (transaction.accountKeys) {
+            accountKeys = transaction.accountKeys;
+        } else if (transactionData.accountKeys) {
+            accountKeys = transactionData.accountKeys;
         }
         
-        console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... with ${accountKeys.length} accounts`);
+        const stringAccountKeys = accountKeys.map(key => {
+            if (typeof key === 'string') {
+                return key;
+            } else if (Buffer.isBuffer(key)) {
+                try {
+                    const { PublicKey } = require('@solana/web3.js');
+                    return new PublicKey(key).toString();
+                } catch (e) {
+                    return key.toString('base64');
+                }
+            } else {
+                return key.toString();
+            }
+        });
+        
+        console.log(`[${new Date().toISOString()}] 🔍 Transaction has ${stringAccountKeys.length} accounts`);
         
         let involvedWallet = null;
         for (const walletAddress of this.monitoredWallets) {
-            if (accountKeys.includes(walletAddress)) {
+            if (stringAccountKeys.includes(walletAddress)) {
                 involvedWallet = walletAddress;
-                console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet ${walletAddress.slice(0,8)}... in transaction`);
+                console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet ${walletAddress.slice(0,8)}... in transaction ${signature.slice(0, 8)}...`);
                 break;
             }
         }
@@ -251,7 +319,7 @@ async processTransaction(transactionData) {
         if (!involvedWallet) {
             if (this.messageCount <= 10) {
                 console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets in transaction ${signature.slice(0, 8)}...`);
-                console.log(`[${new Date().toISOString()}] 📝 Transaction accounts (first 3):`, accountKeys.slice(0, 3).map(k => `${k.slice(0,8)}...`));
+                console.log(`[${new Date().toISOString()}] 📝 Transaction accounts (first 3):`, stringAccountKeys.slice(0, 3).map(k => `${k.slice(0,8)}...`));
                 console.log(`[${new Date().toISOString()}] 📝 Monitored wallets (first 3):`, Array.from(this.monitoredWallets).slice(0, 3).map(k => `${k.slice(0,8)}...`));
             }
             return;
@@ -269,15 +337,29 @@ async processTransaction(transactionData) {
         }
         
         let blockTime;
-        if (transactionData.slot && transactionData.blockTime) {
+        if (transactionData.blockTime) {
             blockTime = Number(transactionData.blockTime);
+        } else if (transactionData.slot) {
+            blockTime = Math.floor(Date.now() / 1000); 
         } else {
             blockTime = Math.floor(Date.now() / 1000);
         }
         
         console.log(`[${new Date().toISOString()}] 🎯 Processing valid transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
         
-        const convertedTransaction = this.convertGrpcToLegacyFormat(transactionData, accountKeys);
+        const formattedTransactionData = {
+            transaction: transaction,
+            meta: meta,
+            slot: transactionData.slot || 0,
+            blockTime: blockTime
+        };
+        
+        const convertedTransaction = this.convertGrpcToLegacyFormat(formattedTransactionData, stringAccountKeys);
+        
+        if (!convertedTransaction) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Failed to convert transaction format for ${signature.slice(0, 8)}...`);
+            return;
+        }
         
         await this.monitoringService.processWebhookMessage({
             signature: signature,
