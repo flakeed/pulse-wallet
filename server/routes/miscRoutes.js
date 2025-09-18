@@ -1,4 +1,4 @@
-module.exports = (auth, db, priceService, solanaWebSocketService) => {
+module.exports = (auth, db, priceService, solanaGrpcService) => { 
   const express = require('express');
   const router = express.Router();
 
@@ -112,9 +112,9 @@ module.exports = (auth, db, priceService, solanaWebSocketService) => {
                     decimals: tokenData.decimals || 6
                   },
                   age: {
-                    createdAt: tokenData.createdAt || null,
-                    ageInHours: tokenData.ageInHours || null,
-                    isNew: (tokenData.ageInHours || 999) < 24
+                    createdAt: tokenData.age?.createdAt || null,
+                    ageInHours: tokenData.age?.ageInHours || null,
+                    isNew: (tokenData.age?.ageInHours || 999) < 24
                   },
                   lastUpdated: tokenData.lastUpdated || new Date().toISOString(),
                   source: tokenData.source || 'price_service',
@@ -185,7 +185,17 @@ module.exports = (auth, db, priceService, solanaWebSocketService) => {
   });
 
   router.get('/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Backend is running' });
+    const grpcStatus = solanaGrpcService.getStatus(); 
+    res.json({ 
+      status: 'ok', 
+      message: 'Backend is running with gRPC',
+      grpc: {
+        connected: grpcStatus.isConnected,
+        activeGroup: grpcStatus.activeGroupId,
+        monitoredWallets: grpcStatus.subscriptions,
+        messageCount: grpcStatus.messageCount
+      }
+    });
   });
 
   router.post('/monitoring/toggle', auth.authRequired, async (req, res) => {
@@ -193,11 +203,11 @@ module.exports = (auth, db, priceService, solanaWebSocketService) => {
       const { action, groupId } = req.body;
   
       if (action === 'start') {
-        await solanaWebSocketService.start(groupId);
-        res.json({ success: true, message: `Global WebSocket monitoring started${groupId ? ` for group ${groupId}` : ''}` });
+        await solanaGrpcService.start(groupId); 
+        res.json({ success: true, message: `Global gRPC monitoring started${groupId ? ` for group ${groupId}` : ''}` });
       } else if (action === 'stop') {
-        await solanaWebSocketService.stop();
-        res.json({ success: true, message: 'Global WebSocket monitoring stopped' });
+        await solanaGrpcService.stop(); 
+        res.json({ success: true, message: 'Global gRPC monitoring stopped' });
       } else {
         res.status(400).json({ error: 'Invalid action. Use "start" or "stop"' });
       }

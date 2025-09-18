@@ -1,4 +1,4 @@
-module.exports = (auth, db, solanaWebSocketService) => {
+module.exports = (auth, db, solanaGrpcService) => {
   const express = require('express');
   const router = express.Router();
 
@@ -49,10 +49,10 @@ module.exports = (auth, db, solanaWebSocketService) => {
         }
       }
       
-      await solanaWebSocketService.switchGroup(groupId);
+      await solanaGrpcService.switchGroup(groupId); 
       res.json({
         success: true,
-        message: `Switched to global group ${groupId || 'all'}`,
+        message: `Switched to global group ${groupId || 'all'} via gRPC`,
       });
     } catch (error) {
       console.error(`[${new Date().toISOString()}] ❌ Error switching group:`, error);

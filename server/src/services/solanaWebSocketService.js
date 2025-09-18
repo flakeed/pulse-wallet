@@ -1,451 +1,367 @@
-const WebSocket = require('ws');
-const { Connection } = require('@solana/web3.js');
+const Client = require('@triton-one/yellowstone-grpc');
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 
-const WS_READY_STATE_OPEN = 1;
-
-class SolanaWebSocketService {
+class SolanaGrpcService {
     constructor() {
-        this.solanaRpc = process.env.SOLANA_RPC_URL || '';
-        this.wsUrl = process.env.WEBHOOK_URL || '';
-        this.connection = new Connection(this.solanaRpc, {
-            commitment: 'confirmed',
-            wsEndpoint: this.wsUrl,
-            httpHeaders: { 'Connection': 'keep-alive' }
-        });
+        this.grpcEndpoint = process.env.GRPC_ENDPOINT || 'http://45.134.108.254:10000';
+        this.client = null;
+        this.stream = null;
         this.monitoringService = new WalletMonitoringService();
         this.db = new Database();
-        this.ws = null;
-        this.subscriptions = new Map();
-        this.reconnectInterval = 3000;
-        this.maxReconnectAttempts = 20;
-        this.reconnectAttempts = 0;
-        this.isConnecting = false;
-        this.messageId = 0;
-        this.pendingRequests = new Map();
-        this.messageCount = 0;
         this.isStarted = false;
-        this.batchSize = 400;
-        this.maxSubscriptions = 1000000;
+        this.isConnecting = false;
+        this.reconnectInterval = 5000;
+        this.maxReconnectAttempts = 10;
+        this.reconnectAttempts = 0;
+        this.messageCount = 0;
         this.activeGroupId = null;
+        this.monitoredWallets = new Set();
+        this.processedTransactions = new Set();
+        
+        setInterval(() => {
+            if (this.processedTransactions.size > 10000) {
+                const toDelete = Array.from(this.processedTransactions).slice(0, 5000);
+                toDelete.forEach(sig => this.processedTransactions.delete(sig));
+            }
+        }, 300000);
     }
 
     async start(groupId = null) {
         if (this.isStarted && this.activeGroupId === groupId) {
-            console.log(`[${new Date().toISOString()}] 🔄 Global WebSocket service already started${groupId ? ` for group ${groupId}` : ''}`);
+            console.log(`[${new Date().toISOString()}] 🔄 gRPC service already started${groupId ? ` for group ${groupId}` : ''}`);
             return;
         }
-        console.log(`[${new Date().toISOString()}] 🚀 Starting Global Solana WebSocket client for ${this.wsUrl}${groupId ? `, group ${groupId}` : ''}`);
+
+        console.log(`[${new Date().toISOString()}] 🚀 Starting Solana gRPC client for ${this.grpcEndpoint}${groupId ? `, group ${groupId}` : ''}`);
         this.isStarted = true;
         this.activeGroupId = groupId;
+
         try {
             await this.connect();
-            await this.subscribeToWallets();
+            await this.subscribeToTransactions();
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to start global WebSocket service:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Failed to start gRPC service:`, error.message);
             this.isStarted = false;
             throw error;
         }
     }
 
     async connect() {
-        if (this.isConnecting || (this.ws && this.ws.readyState === WS_READY_STATE_OPEN)) return;
+        if (this.isConnecting || this.client) return;
         this.isConnecting = true;
 
-        console.log(`[${new Date().toISOString()}] 🔌 Connecting to WebSocket: ${this.wsUrl}`);
+        console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcEndpoint}`);
         
         try {
-            this.ws?.close();
-            this.ws = new WebSocket(this.wsUrl, {
-                handshakeTimeout: 10000,
-                perMessageDeflate: false,
+            this.client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_timeout_ms': 5000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 10000,
+                'grpc.http2.min_ping_interval_without_data_ms': 300000
             });
 
-            this.ws.on('open', () => {
-                console.log(`[${new Date().toISOString()}] ✅ Connected to Global Solana WebSocket`);
-                this.reconnectAttempts = 0;
-                this.isConnecting = false;
-            });
-
-            this.ws.on('message', async (data) => {
-                this.messageCount++;
-                try {
-                    const message = JSON.parse(data.toString());
-                    await this.handleMessage(message);
-                } catch (error) {
-                    console.error(`[${new Date().toISOString()}] ❌ Error parsing WebSocket message:`, error.message);
-                }
-            });
-
-            this.ws.on('error', (error) => {
-                console.error(`[${new Date().toISOString()}] ❌ WebSocket error:`, error.message);
-                this.handleReconnect();
-            });
-
-            this.ws.on('close', (code, reason) => {
-                console.log(`[${new Date().toISOString()}] 🔌 WebSocket closed. Code: ${code}, Reason: ${reason.toString()}`);
-                this.isConnecting = false;
-                if (this.isStarted) this.handleReconnect();
-            });
-
-            this.ws.on('ping', (data) => {
-                this.ws.pong(data);
-            });
-
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('Connection timeout')), 10000);
-                this.ws.on('open', () => { clearTimeout(timeout); resolve(); });
-                this.ws.on('error', (error) => { clearTimeout(timeout); reject(error); });
-            });
+            console.log(`[${new Date().toISOString()}] ✅ Connected to Solana gRPC`);
+            this.reconnectAttempts = 0;
+            this.isConnecting = false;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to create WebSocket connection:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC client:`, error.message);
             this.isConnecting = false;
             throw error;
         }
     }
 
-    async handleMessage(message) {
-        if (!message || typeof message !== 'object') {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Invalid message format`);
-            return;
-        }
+    async subscribeToTransactions() {
+        try {
+            const wallets = await this.db.getActiveWallets(this.activeGroupId);
+            this.monitoredWallets.clear();
+            wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+            
+            console.log(`[${new Date().toISOString()}] 📊 Monitoring ${this.monitoredWallets.size} wallets${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
 
-        if (message.id && this.pendingRequests.has(message.id)) {
-            const { resolve, reject, type } = this.pendingRequests.get(message.id);
-            this.pendingRequests.delete(message.id);
-            if (message.error) {
-                reject(new Error(message.error.message));
-            } else {
-                resolve(message.result);
+            if (this.stream) {
+                this.stream.end();
             }
-            return;
-        }
 
-        if (message.method === 'logsNotification') {
-            await this.handleLogsNotification(message.params);
+            const request = {
+                slots: {},
+                accounts: {},
+                transactions: {
+                    "all_transactions": {
+                        accountInclude: [],
+                        accountExclude: [],
+                        accountRequired: []
+                    }
+                },
+                blocks: {},
+                blocksMeta: {},
+                accountsDataSlice: [],
+                commitment: 1,
+                entry: {}
+            };
+
+            this.stream = await this.client.subscribe();
+            
+            this.stream.on('data', (data) => {
+                this.messageCount++;
+                this.handleGrpcMessage(data);
+            });
+
+            this.stream.on('error', (error) => {
+                console.error(`[${new Date().toISOString()}] ❌ gRPC stream error:`, error.message);
+                this.handleReconnect();
+            });
+
+            this.stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] 🔌 gRPC stream ended`);
+                if (this.isStarted) this.handleReconnect();
+            });
+
+            this.stream.write(request);
+            console.log(`[${new Date().toISOString()}] ✅ Subscribed to all Solana transactions via gRPC`);
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error subscribing to transactions:`, error.message);
+            throw error;
         }
     }
 
-    async handleLogsNotification(params) {
-        if (!params?.result || !params.subscription) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Invalid logs notification params`);
-            return;
+    async handleGrpcMessage(data) {
+        try {
+            if (data.transaction) {
+                await this.processTransaction(data.transaction);
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error handling gRPC message:`, error.message);
         }
-        
-        const { result, subscription } = params;
-        const walletAddress = this.findWalletBySubscription(subscription);
-        
-        if (!walletAddress) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ No wallet found for subscription ${subscription}`);
-            return;
-        }
-    
-        if (result.value && result.value.signature) {
-            console.log(`[${new Date().toISOString()}] 🔍 New transaction detected: ${result.value.signature} for wallet ${walletAddress.slice(0,8)}...`);
+    }
+
+    async processTransaction(transactionData) {
+        try {
+            const transaction = transactionData.transaction;
+            const meta = transactionData.meta;
             
-            const wallet = await this.db.getWalletByAddress(walletAddress);
-            if (!wallet) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletAddress} not found in database`);
+            if (!transaction || !meta || meta.err) {
                 return;
             }
+
+            const signature = transaction.signatures[0];
             
-            console.log(`[${new Date().toISOString()}] 📝 Processing transaction for wallet ${walletAddress.slice(0,8)}... (group: ${wallet.group_id || 'none'})`);
+            if (this.processedTransactions.has(signature)) {
+                return;
+            }
+            this.processedTransactions.add(signature);
+
+            let accountKeys = [];
+            if (transaction.message.accountKeys) {
+                accountKeys = transaction.message.accountKeys.map(key => 
+                    Buffer.from(key).toString('base64')
+                );
+            }
+
+            let involvedWallet = null;
+            for (const walletAddress of this.monitoredWallets) {
+                try {
+                    const { PublicKey } = require('@solana/web3.js');
+                    const pubkey = new PublicKey(walletAddress);
+                    const base64Key = Buffer.from(pubkey.toBytes()).toString('base64');
+                    
+                    if (accountKeys.includes(base64Key)) {
+                        involvedWallet = walletAddress;
+                        break;
+                    }
+                } catch (error) {
+                    console.warn(`[${new Date().toISOString()}] ⚠️ Invalid wallet address: ${walletAddress}`);
+                    continue;
+                }
+            }
+
+            if (!involvedWallet) {
+                return;
+            }
+
+            const wallet = await this.db.getWalletByAddress(involvedWallet);
+            if (!wallet) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${involvedWallet} not found in database`);
+                return;
+            }
+
+            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+                return;
+            }
+
+            let blockTime;
+            if (transactionData.slot && transactionData.blockTime) {
+                blockTime = Number(transactionData.blockTime);
+            } else {
+                blockTime = Math.floor(Date.now() / 1000);
+            }
+
+            console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}...`);
+
+            const convertedTransaction = this.convertGrpcToLegacyFormat(transactionData, accountKeys);
             
             await this.monitoringService.processWebhookMessage({
-                signature: result.value.signature,
-                walletAddress,
-                blockTime: result.value.timestamp || Math.floor(Date.now() / 1000),
-                groupId: wallet.group_id
+                signature: signature,
+                walletAddress: involvedWallet,
+                blockTime: blockTime,
+                groupId: wallet.group_id,
+                transactionData: convertedTransaction
             });
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
         }
     }
 
-    findWalletBySubscription(subscriptionId) {
-        return Array.from(this.subscriptions.entries()).find(([_, subData]) => subData.logs === subscriptionId)?.[0] || null;
+    convertGrpcToLegacyFormat(grpcData, accountKeys) {
+        try {
+            const transaction = grpcData.transaction;
+            const meta = grpcData.meta;
+
+            const converted = {
+                transaction: {
+                    message: {
+                        accountKeys: accountKeys.map(key => {
+                            try {
+                                const { PublicKey } = require('@solana/web3.js');
+                                return new PublicKey(Buffer.from(key, 'base64'));
+                            } catch (error) {
+                                return key;
+                            }
+                        }),
+                        instructions: transaction.message.instructions || []
+                    },
+                    signatures: transaction.signatures || []
+                },
+                meta: {
+                    err: meta.err,
+                    fee: meta.fee || 0,
+                    preBalances: meta.preBalances || [],
+                    postBalances: meta.postBalances || [],
+                    preTokenBalances: this.convertTokenBalances(meta.preTokenBalances || []),
+                    postTokenBalances: this.convertTokenBalances(meta.postTokenBalances || []),
+                    logMessages: meta.logMessages || [],
+                    innerInstructions: meta.innerInstructions || []
+                },
+                slot: grpcData.slot,
+                blockTime: grpcData.blockTime ? Number(grpcData.blockTime) : Math.floor(Date.now() / 1000)
+            };
+
+            return converted;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error converting gRPC format:`, error.message);
+            return null;
+        }
+    }
+
+    convertTokenBalances(grpcTokenBalances) {
+        return grpcTokenBalances.map(balance => ({
+            accountIndex: balance.accountIndex || 0,
+            mint: balance.mint || '',
+            owner: balance.owner || '',
+            programId: balance.programId || '',
+            uiTokenAmount: {
+                amount: balance.uiTokenAmount?.amount || '0',
+                decimals: balance.uiTokenAmount?.decimals || 0,
+                uiAmount: balance.uiTokenAmount?.uiAmount || 0,
+                uiAmountString: balance.uiTokenAmount?.uiAmountString || '0'
+            }
+        }));
     }
 
     async subscribeToWalletsBatch(walletAddresses, batchSize = 100) {
-        if (!walletAddresses || walletAddresses.length === 0) return;
+        console.log(`[${new Date().toISOString()}] 📦 Adding ${walletAddresses.length} wallets to gRPC monitoring`);
         
-        if (!this.ws || this.ws.readyState !== WS_READY_STATE_OPEN) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Cannot batch subscribe - WebSocket not connected`);
-            return;
-        }
+        walletAddresses.forEach(address => {
+            this.monitoredWallets.add(address);
+        });
 
-        const startTime = Date.now();
-
-        const results = {
-            successful: 0,
+        console.log(`[${new Date().toISOString()}] ✅ gRPC now monitoring ${this.monitoredWallets.size} total wallets`);
+        
+        return {
+            successful: walletAddresses.length,
             failed: 0,
             errors: []
         };
-
-        for (let i = 0; i < walletAddresses.length; i += batchSize) {
-            const batch = walletAddresses.slice(i, i + batchSize);
-            
-            console.log(`[${new Date().toISOString()}] 📦 Processing global batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(walletAddresses.length / batchSize)} (${batch.length} wallets)`);
-
-            const batchPromises = batch.map(async (walletAddress) => {
-                try {
-                    if (this.subscriptions.has(walletAddress)) {
-                        console.log(`[${new Date().toISOString()}] ⏭️ Wallet ${walletAddress.slice(0, 8)}... already subscribed globally`);
-                        return { success: true, address: walletAddress, action: 'already_subscribed' };
-                    }
-
-                    if (this.subscriptions.size >= this.maxSubscriptions) {
-                        throw new Error(`Maximum global subscription limit of ${this.maxSubscriptions} reached`);
-                    }
-
-                    const logsSubscriptionId = await this.sendRequest('logsSubscribe', [
-                        { mentions: [walletAddress] },
-                        { commitment: 'confirmed' },
-                    ], 'logsSubscribe');
-
-                    this.subscriptions.set(walletAddress, { logs: logsSubscriptionId });
-                    results.successful++;
-                    
-                    return { success: true, address: walletAddress, subscriptionId: logsSubscriptionId };
-
-                } catch (error) {
-                    results.failed++;
-                    results.errors.push({ address: walletAddress, error: error.message });
-                    console.error(`[${new Date().toISOString()}] ❌ Failed to subscribe to ${walletAddress.slice(0, 8)}...: ${error.message}`);
-                    return { success: false, address: walletAddress, error: error.message };
-                }
-            });
-
-            await Promise.all(batchPromises);
-
-            if (i + batchSize < walletAddresses.length) {
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
-        }
-
-        const duration = Date.now() - startTime;
-        const walletsPerSecond = Math.round((results.successful / duration) * 1000);
-
-        console.log(`[${new Date().toISOString()}] ✅ Global batch subscription completed in ${duration}ms:`);
-        console.log(`  - Successful: ${results.successful}`);
-        console.log(`  - Failed: ${results.failed}`);
-        console.log(`  - Performance: ${walletsPerSecond} subscriptions/second`);
-        console.log(`  - Total active subscriptions: ${this.subscriptions.size}`);
-
-        return results;
     }
 
     async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 100) {
-        if (!walletAddresses || walletAddresses.length === 0) return;
-    
-        const startTime = Date.now();
-    
-        const results = {
-            successful: 0,
+        console.log(`[${new Date().toISOString()}] 📦 Removing ${walletAddresses.length} wallets from gRPC monitoring`);
+        
+        walletAddresses.forEach(address => {
+            this.monitoredWallets.delete(address);
+        });
+
+        console.log(`[${new Date().toISOString()}] ✅ gRPC now monitoring ${this.monitoredWallets.size} total wallets`);
+        
+        return {
+            successful: walletAddresses.length,
             failed: 0,
             errors: []
         };
-    
-        for (let i = 0; i < walletAddresses.length; i += batchSize) {
-            const batch = walletAddresses.slice(i, i + batchSize);
-    
-            const batchPromises = batch.map(async (walletAddress) => {
-                try {
-                    const subData = this.subscriptions.get(walletAddress);
-                    
-                    if (!subData?.logs) {
-                        this.subscriptions.delete(walletAddress);
-                        results.successful++;
-                        return { success: true, address: walletAddress, action: 'not_subscribed' };
-                    }
-    
-                    if (this.ws && this.ws.readyState === WS_READY_STATE_OPEN) {
-                        try {
-                            await this.sendRequest('logsUnsubscribe', [subData.logs], 'logsUnsubscribe');
-                            console.log(`[${new Date().toISOString()}] ✅ Successfully unsubscribed from ${walletAddress.slice(0, 8)}... globally`);
-                        } catch (wsError) {
-                            console.warn(`[${new Date().toISOString()}] ⚠️ WebSocket unsubscribe failed for ${walletAddress.slice(0, 8)}...: ${wsError.message}`);
-                        }
-                    } else {
-                        console.warn(`[${new Date().toISOString()}] ⚠️ WebSocket not connected, skipping network unsubscribe for ${walletAddress.slice(0, 8)}...`);
-                    }
-    
-                    this.subscriptions.delete(walletAddress);
-                    results.successful++;
-                    
-                    return { success: true, address: walletAddress };
-    
-                } catch (error) {
-                    results.failed++;
-                    results.errors.push({ address: walletAddress, error: error.message });
-                    console.error(`[${new Date().toISOString()}] ❌ Failed to unsubscribe from ${walletAddress.slice(0, 8)}...: ${error.message}`);
-                    
-                    this.subscriptions.delete(walletAddress);
-                    
-                    return { success: false, address: walletAddress, error: error.message };
-                }
-            });
-    
-            await Promise.all(batchPromises);
-    
-            if (i + batchSize < walletAddresses.length) {
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
-        }
-    
-        const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] ✅ Global batch unsubscription completed in ${duration}ms: ${results.successful} successful, ${results.failed} failed`);
-        console.log(`[${new Date().toISOString()}] 📊 Remaining active subscriptions: ${this.subscriptions.size}`);
-    
-        return results;
-    }
-
-    async subscribeToWallets() {
-        this.subscriptions.clear();
-        
-        const wallets = await this.db.getActiveWallets(this.activeGroupId);
-        
-        console.log(`[${new Date().toISOString()}] 📊 Found ${wallets.length} wallets to monitor${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
-        
-        if (wallets.length === 0) {
-            console.log(`[${new Date().toISOString()}] ℹ️ No wallets found for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ''}`);
-            return { successful: 0, failed: 0, errors: [] };
-        }
-        
-        if (wallets.length > this.maxSubscriptions) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet count (${wallets.length}) exceeds maximum (${this.maxSubscriptions}), truncating`);
-            wallets.length = this.maxSubscriptions;
-        }
-        
-        if (wallets.length > 0) {
-            console.log(`[${new Date().toISOString()}] 🔍 Sample wallets to subscribe (group: ${this.activeGroupId || 'all'}):`);
-            wallets.slice(0, 5).forEach(wallet => {
-                console.log(`  - ${wallet.address.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
-            });
-        }
-    
-        const walletAddresses = wallets.map(w => w.address);
-        const results = await this.subscribeToWalletsBatch(walletAddresses, 1000);
-    
-        console.log(`[${new Date().toISOString()}] 🎉 Subscription summary for group ${this.activeGroupId || 'all'}:`);
-        console.log(`  - Total wallets: ${wallets.length}`);
-        console.log(`  - Successful subscriptions: ${results.successful}`);
-        console.log(`  - Failed subscriptions: ${results.failed}`);
-        console.log(`  - Active subscriptions: ${this.subscriptions.size}`);
-        console.log(`  - Active group ID: ${this.activeGroupId || 'none'}`);
-    
-        return results;
-    }
-
-    async unsubscribeFromWallet(walletAddress) {
-        const subData = this.subscriptions.get(walletAddress);
-        if (!subData?.logs || !this.ws || this.ws.readyState !== WS_READY_STATE_OPEN) return;
-
-        try {
-            await this.sendRequest('logsUnsubscribe', [subData.logs], 'logsUnsubscribe');
-            console.log(`[${new Date().toISOString()}] ✅ Unsubscribed from global logs for ${walletAddress.slice(0, 8)}...`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error unsubscribing from global ${walletAddress}:`, error.message);
-        }
-        this.subscriptions.delete(walletAddress);
     }
 
     async subscribeToWallet(walletAddress) {
-        if (this.subscriptions.size >= this.maxSubscriptions) {
-            throw new Error(`Maximum global subscription limit of ${this.maxSubscriptions} reached`);
-        }
-        
-        if (!this.ws || this.ws.readyState !== WS_READY_STATE_OPEN) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Cannot subscribe to global wallet ${walletAddress.slice(0, 8)}... - WebSocket not connected`);
-            return;
-        }
-        
-        try {
-            if (this.subscriptions.has(walletAddress)) {
-                console.log(`[${new Date().toISOString()}] ℹ️ Global wallet ${walletAddress.slice(0, 8)}... already subscribed`);
-                return;
-            }
+        this.monitoredWallets.add(walletAddress);
+        console.log(`[${new Date().toISOString()}] ✅ Added wallet ${walletAddress.slice(0, 8)}... to gRPC monitoring`);
+        return { success: true };
+    }
 
-            const logsSubscriptionId = await this.sendRequest('logsSubscribe', [
-                { mentions: [walletAddress] },
-                { commitment: 'confirmed' },
-            ], 'logsSubscribe');
-            
-            this.subscriptions.set(walletAddress, { logs: logsSubscriptionId });
-            console.log(`[${new Date().toISOString()}] ✅ Subscribed to global wallet ${walletAddress.slice(0, 8)}... (logs: ${logsSubscriptionId})`);
-            
-            return { success: true, subscriptionId: logsSubscriptionId };
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error subscribing to global wallet ${walletAddress}:`, error.message);
-            throw error;
-        }
+    async unsubscribeFromWallet(walletAddress) {
+        this.monitoredWallets.delete(walletAddress);
+        console.log(`[${new Date().toISOString()}] ✅ Removed wallet ${walletAddress.slice(0, 8)}... from gRPC monitoring`);
     }
 
     async removeAllWallets(groupId = null) {
         try {
             const startTime = Date.now();
-            console.log(`[${new Date().toISOString()}] 🗑️ Starting complete wallet removal from WebSocket service${groupId ? ` for group ${groupId}` : ''}`);
+            console.log(`[${new Date().toISOString()}] 🗑️ Starting wallet removal from gRPC service${groupId ? ` for group ${groupId}` : ''}`);
             
             const walletsToRemove = await this.db.getActiveWallets(groupId);
-            const addressesToUnsubscribe = walletsToRemove.map(w => w.address);
+            const addressesToRemove = walletsToRemove.map(w => w.address);
             
-            console.log(`[${new Date().toISOString()}] 📊 WebSocket service found ${walletsToRemove.length} wallets to remove`);
+            console.log(`[${new Date().toISOString()}] 📊 gRPC service removing ${walletsToRemove.length} wallets from monitoring`);
             
-            if (addressesToUnsubscribe.length > 0) {
-                console.log(`[${new Date().toISOString()}] 🔌 Unsubscribing ${addressesToUnsubscribe.length} wallets from Solana node...`);
-                
-                try {
-                    const unsubscribeResults = await this.unsubscribeFromWalletsBatch(addressesToUnsubscribe, 200);
-                    console.log(`[${new Date().toISOString()}] ✅ Solana node unsubscription completed: ${unsubscribeResults.successful} successful, ${unsubscribeResults.failed} failed`);
-                } catch (unsubError) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Some Solana unsubscriptions failed: ${unsubError.message}`);
-                    
-                    addressesToUnsubscribe.forEach(address => {
-                        this.subscriptions.delete(address);
-                    });
-                    console.log(`[${new Date().toISOString()}] 🧹 Manual cleanup of ${addressesToUnsubscribe.length} local subscriptions completed`);
-                }
-            }
+            addressesToRemove.forEach(address => {
+                this.monitoredWallets.delete(address);
+            });
             
-            console.log(`[${new Date().toISOString()}] 🗄️ Starting database removal...`);
             await this.monitoringService.removeAllWallets(groupId);
-            console.log(`[${new Date().toISOString()}] ✅ Database removal completed`);
             
-            const shouldResubscribe = this.isStarted && (
+            const shouldReload = this.isStarted && (
                 (groupId && groupId === this.activeGroupId) ||
                 (!groupId)
             );
             
-            if (shouldResubscribe) {
-                console.log(`[${new Date().toISOString()}] 🔄 Resubscribing to remaining wallets after group deletion...`);
+            if (shouldReload) {
+                console.log(`[${new Date().toISOString()}] 🔄 Reloading wallet list for gRPC monitoring...`);
                 
-                try {
-                    await this.subscribeToWallets();
-                    console.log(`[${new Date().toISOString()}] ✅ Resubscription completed: ${this.subscriptions.size} active subscriptions`);
-                } catch (resubError) {
-                    console.error(`[${new Date().toISOString()}] ❌ Resubscription failed: ${resubError.message}`);
-                }
+                const remainingWallets = await this.db.getActiveWallets(this.activeGroupId);
+                this.monitoredWallets.clear();
+                remainingWallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+                
+                console.log(`[${new Date().toISOString()}] ✅ gRPC monitoring reloaded: ${this.monitoredWallets.size} wallets`);
             }
             
             const duration = Date.now() - startTime;
-            const finalReport = {
-                walletsRemoved: walletsToRemove.length,
-                addressesUnsubscribed: addressesToUnsubscribe.length,
-                remainingSubscriptions: this.subscriptions.size,
-                groupId: groupId,
-                resubscribed: shouldResubscribe,
-                processingTime: `${duration}ms`
-            };
-            
-            console.log(`[${new Date().toISOString()}] 🎉 Complete WebSocket wallet removal finished in ${duration}ms:`, finalReport);
+            console.log(`[${new Date().toISOString()}] 🎉 gRPC wallet removal completed in ${duration}ms`);
             
             return {
                 success: true,
-                message: `WebSocket service: removed ${walletsToRemove.length} wallets, unsubscribed from Solana node, ${this.subscriptions.size} subscriptions remaining`,
-                details: finalReport
+                message: `gRPC service: removed ${walletsToRemove.length} wallets from monitoring`,
+                details: {
+                    walletsRemoved: walletsToRemove.length,
+                    remainingWallets: this.monitoredWallets.size,
+                    groupId: groupId,
+                    processingTime: `${duration}ms`
+                }
             };
             
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error in WebSocket removeAllWallets:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error in gRPC removeAllWallets:`, error.message);
             throw error;
         }
     }
@@ -453,96 +369,88 @@ class SolanaWebSocketService {
     async switchGroup(groupId) {
         try {
             const startTime = Date.now();
-            console.log(`[${new Date().toISOString()}] 🔄 Switching to global group ${groupId || 'all'}`);
-
-            if (this.subscriptions.size > 0) {
-                const currentAddresses = Array.from(this.subscriptions.keys());
-                await this.unsubscribeFromWalletsBatch(currentAddresses);
-            }
+            console.log(`[${new Date().toISOString()}] 🔄 Switching gRPC monitoring to group ${groupId || 'all'}`);
 
             this.activeGroupId = groupId;
-            await this.subscribeToWallets();
+            
+            const wallets = await this.db.getActiveWallets(groupId);
+            this.monitoredWallets.clear();
+            wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
 
             const duration = Date.now() - startTime;
-            console.log(`[${new Date().toISOString()}] ✅ Global group switch completed in ${duration}ms: now monitoring ${this.subscriptions.size} wallets`);
+            console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error in global switchGroup:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
             throw error;
         }
     }
 
-    sendRequest(method, params, type) {
-        return new Promise((resolve, reject) => {
-            if (!this.ws || this.ws.readyState !== WS_READY_STATE_OPEN) {
-                reject(new Error('WebSocket is not connected'));
-                return;
-            }
-
-            const id = ++this.messageId;
-            this.pendingRequests.set(id, { resolve, reject, type });
-            this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-
-            setTimeout(() => {
-                if (this.pendingRequests.has(id)) {
-                    this.pendingRequests.delete(id);
-                    reject(new Error(`Request ${type} (id: ${id}) timed out`));
-                }
-            }, 60000);
-        });
-    }
-
     async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] ❌ Max reconnect attempts reached for global service`);
+            console.error(`[${new Date().toISOString()}] ❌ Max reconnect attempts reached for gRPC service`);
             this.isStarted = false;
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        console.log(`[${new Date().toISOString()}] 🔄 Reconnecting gRPC service (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+        if (this.stream) {
+            this.stream.end();
+            this.stream = null;
+        }
+        if (this.client) {
+            this.client.close();
+            this.client = null;
+        }
 
         await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
+        
         try {
             await this.connect();
-            await this.subscribeToWallets();
+            await this.subscribeToTransactions();
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ gRPC reconnect failed:`, error.message);
+            await this.handleReconnect();
         }
     }
 
     getStatus() {
         return {
-            isConnected: this.ws && this.ws.readyState === WS_READY_STATE_OPEN,
+            isConnected: this.client !== null && this.stream !== null,
             isStarted: this.isStarted,
             activeGroupId: this.activeGroupId,
-            subscriptions: this.subscriptions.size,
+            subscriptions: this.monitoredWallets.size,
             messageCount: this.messageCount,
             reconnectAttempts: this.reconnectAttempts,
-            wsUrl: this.wsUrl,
-            rpcUrl: this.solanaRpc,
-            mode: 'global'
+            grpcEndpoint: this.grpcEndpoint,
+            mode: 'grpc'
         };
     }
 
     async stop() {
         this.isStarted = false;
-        for (const walletAddress of this.subscriptions.keys()) {
-            await this.unsubscribeFromWallet(walletAddress).catch(() => {});
+        
+        if (this.stream) {
+            this.stream.end();
+            this.stream = null;
         }
-        if (this.ws) {
-            this.ws.removeAllListeners();
-            this.ws.close();
-            this.ws = null;
+        
+        if (this.client) {
+            this.client.close();
+            this.client = null;
         }
-        console.log(`[${new Date().toISOString()}] ⏹️ Global WebSocket client stopped`);
+        
+        this.monitoredWallets.clear();
+        console.log(`[${new Date().toISOString()}] ⏹️ gRPC client stopped`);
     }
 
     async shutdown() {
         await this.stop();
         await this.db.close().catch(() => {});
-        console.log(`[${new Date().toISOString()}] ✅ Global WebSocket service shutdown complete`);
+        console.log(`[${new Date().toISOString()}] ✅ gRPC service shutdown complete`);
     }
 }
 
-module.exports = SolanaWebSocketService;
+module.exports = SolanaGrpcService;

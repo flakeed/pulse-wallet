@@ -16,7 +16,6 @@ class WalletMonitoringService {
         this.processedSignatures = new Set();
         this.recentlyProcessed = new Set();
         
-        // Configurable SOL thresholds from environment variables
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.FEE_THRESHOLD = parseFloat(process.env.SOL_FEE_THRESHOLD) || 0.01;
@@ -36,7 +35,7 @@ class WalletMonitoringService {
             startTime: Date.now(),
         };
         this.isProcessingQueue = false;
-        this.queueKey = 'webhook:queue';
+        this.queueKey = 'grpc:queue';
         this.batchSize = 400;
         this.solPriceCache = {
             price: 150,
@@ -71,7 +70,7 @@ class WalletMonitoringService {
     
             const batchResults = await Promise.all(
                 requests.map(async (request) => {
-                    const { signature, walletAddress, blockTime } = request;
+                    const { signature, walletAddress, blockTime, groupId, transactionData } = request;
                     try {
                         const wallet = await this.db.getWalletByAddress(walletAddress);
                         if (!wallet) {
@@ -79,9 +78,14 @@ class WalletMonitoringService {
                             return null;
                         }
     
-                        const txData = await this.processTransaction({ signature, blockTime }, wallet);
+                        const txData = await this.processTransactionFromGrpc({ 
+                            signature, 
+                            blockTime,
+                            transactionData 
+                        }, wallet);
+                        
                         if (txData) {
-                            console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature}`);
+                            console.log(`[${new Date().toISOString()}] ✅ Processed gRPC transaction ${signature}`);
                             return {
                                 signature,
                                 walletAddress,
@@ -101,7 +105,7 @@ class WalletMonitoringService {
                         }
                         return null;
                     } catch (error) {
-                        console.error(`[${new Date().toISOString()}] ❌ Error processing signature ${signature}:`, error.message);
+                        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC signature ${signature}:`, error.message);
                         return null;
                     }
                 })
@@ -118,7 +122,7 @@ class WalletMonitoringService {
                         pipeline.publish(`transactions:group:${tx.groupId}`, JSON.stringify(tx));
                     }
                     
-                    console.log(`[${new Date().toISOString()}] 📤 Publishing transaction ${tx.signature} to channels: transactions${tx.groupId ? `, transactions:group:${tx.groupId}` : ''}`);
+                    console.log(`[${new Date().toISOString()}] 📤 Publishing gRPC transaction ${tx.signature} to channels: transactions${tx.groupId ? `, transactions:group:${tx.groupId}` : ''}`);
                 });
                 
                 await pipeline.exec();
@@ -133,13 +137,15 @@ class WalletMonitoringService {
     }
 
     async processWebhookMessage(message) {
-        const { signature, walletAddress, blockTime } = message;
+        const { signature, walletAddress, blockTime, groupId, transactionData } = message;
         const requestId = require('uuid').v4();
         await redis.lpush(this.queueKey, JSON.stringify({
             requestId,
             signature,
             walletAddress,
             blockTime,
+            groupId,
+            transactionData,
             timestamp: Date.now(),
         }));
 
@@ -148,85 +154,24 @@ class WalletMonitoringService {
         }
     }
 
-    async fetchTransactionWithRetry(signature, maxRetries = 3) {
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                const options = {
-                    maxSupportedTransactionVersion: 0, 
-                    commitment: 'confirmed',
-                };
-    
-                const tx = await this.connection.getParsedTransaction(signature, options);
-                
-                if (!tx) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Transaction ${signature} not found (attempt ${attempt})`);
-                    if (attempt < maxRetries) {
-                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-                        continue;
-                    }
-                    return null;
-                }
-    
-                if (tx.meta?.err) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Transaction ${signature} failed:`, tx.meta.err);
-                    return null;
-                }
-    
-                return tx;
-            } catch (error) {
-                console.error(`[${new Date().toISOString()}] ❌ Error fetching transaction ${signature} (attempt ${attempt}):`, error.message);
-                
-                if (attempt < maxRetries) {
-                    console.log(`[${new Date().toISOString()}] ⏳ Waiting before retry...`);
-                    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-                }
-            }
-        }
-        
-        console.error(`[${new Date().toISOString()}] ❌ Failed to fetch transaction ${signature} after ${maxRetries} attempts`);
-        return null;
-    }
-
-    async fetchSolPrice() {
-        const now = Date.now();
-        
-        if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
-            return this.solPriceCache.price;
-        }
-
+    async processTransactionFromGrpc(grpcData, wallet) {
         try {
-            const priceData = await this.priceService.getSolPrice();
-            const newPrice = priceData.price || 150;
+            const { signature, blockTime, transactionData } = grpcData;
 
-            this.solPriceCache = {
-                price: newPrice,
-                lastUpdated: now,
-                cacheTimeout: 60000
-            };
-            
-            return newPrice;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
-            return this.solPriceCache.price; 
-        }
-    }
-
-    async processTransaction(sig, wallet) {
-        try {
-            if (!sig.signature || !sig.blockTime) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid signature object:`, sig);
+            if (!signature || !blockTime || !transactionData) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid gRPC data:`, grpcData);
                 return null;
             }
 
             const existingTx = await this.db.pool.query(
                 'SELECT id FROM transactions WHERE signature = $1 AND wallet_id = $2',
-                [sig.signature, wallet.id]
+                [signature, wallet.id]
             );
             if (existingTx.rows.length > 0) {
                 return null;
             }
 
-            const processedKey = `${sig.signature}-${wallet.id}`;
+            const processedKey = `${signature}-${wallet.id}`;
             if (this.recentlyProcessed.has(processedKey)) {
                 return null;
             }
@@ -237,32 +182,36 @@ class WalletMonitoringService {
                 toDelete.forEach(key => this.recentlyProcessed.delete(key));
             }
 
-            const tx = await this.fetchTransactionWithRetry(sig.signature);
+            const tx = transactionData;
             if (!tx || !tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid transaction ${sig.signature} - missing metadata`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid gRPC transaction ${signature} - missing metadata`);
                 return null;
             }
 
             const walletPubkey = wallet.address;
             let walletIndex = -1;
+            
             if (tx.transaction.message.accountKeys) {
-                if (Array.isArray(tx.transaction.message.accountKeys)) {
-                    walletIndex = tx.transaction.message.accountKeys.findIndex(
-                        (key) => key.pubkey ? key.pubkey.toString() === walletPubkey : key.toString() === walletPubkey
-                    );
-                } else if (tx.transaction.message.staticAccountKeys) {
-                    walletIndex = tx.transaction.message.staticAccountKeys.findIndex(
-                        (key) => key.toString() === walletPubkey
-                    );
-                }
-                if (walletIndex === -1 && tx.transaction.message.addressTableLookups) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Versioned transaction with address table lookups not fully supported yet`);
-                    return null;
-                }
+                walletIndex = tx.transaction.message.accountKeys.findIndex(
+                    (key) => {
+                        try {
+                            if (typeof key === 'string') {
+                                return key === walletPubkey;
+                            } else if (key.toString) {
+                                return key.toString() === walletPubkey;
+                            } else if (key.pubkey) {
+                                return key.pubkey.toString() === walletPubkey;
+                            }
+                            return false;
+                        } catch (error) {
+                            return false;
+                        }
+                    }
+                );
             }
 
             if (walletIndex === -1) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletPubkey} not found in transaction ${sig.signature}`);
+                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${walletPubkey} not found in gRPC transaction ${signature}`);
                 return null;
             }
 
@@ -288,7 +237,7 @@ class WalletMonitoringService {
                 usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
             }
 
-            console.log(`[${new Date().toISOString()}] 💰 Transaction analysis for ${sig.signature}:`);
+            console.log(`[${new Date().toISOString()}] 💰 gRPC Transaction analysis for ${signature}:`);
             console.log(`  - SOL change: ${solChange.toFixed(6)} SOL`);
             console.log(`  - USDC change: ${usdcChange.toFixed(6)} USDC`);
             console.log(`  - Using thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}, fee>${this.FEE_THRESHOLD}`);
@@ -317,12 +266,12 @@ class WalletMonitoringService {
                 console.log(`[${new Date().toISOString()}] 💰 SOL sell detected: ${solChange.toFixed(6)} SOL (threshold: ${this.SELL_THRESHOLD})`);
                 tokenChanges = await this.analyzeTokenChanges(tx.meta, transactionType, walletPubkey);
             } else {
-                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - SOL change too small: ${solChange.toFixed(6)} (buy threshold: ${this.BUY_THRESHOLD}, sell threshold: ${this.SELL_THRESHOLD})`);
+                console.log(`[${new Date().toISOString()}] ℹ️ gRPC Transaction ${signature} - SOL change too small: ${solChange.toFixed(6)} (buy threshold: ${this.BUY_THRESHOLD}, sell threshold: ${this.SELL_THRESHOLD})`);
                 return null;
             }
 
             if (tokenChanges.length === 0) {
-                console.log(`[${new Date().toISOString()}] ℹ️ Transaction ${sig.signature} - no token changes detected`);
+                console.log(`[${new Date().toISOString()}] ℹ️ gRPC Transaction ${signature} - no token changes detected`);
                 return null;
             }
 
@@ -357,7 +306,7 @@ class WalletMonitoringService {
             return await this.db.withTransaction(async (client) => {
                 const finalCheck = await client.query(
                     'SELECT id FROM transactions WHERE signature = $1 AND wallet_id = $2',
-                    [sig.signature, wallet.id]
+                    [signature, wallet.id]
                 );
                 if (finalCheck.rows.length > 0) {
                     return null;
@@ -373,8 +322,8 @@ class WalletMonitoringService {
                 `;
                 const result = await client.query(query, [
                     wallet.id,
-                    sig.signature,
-                    new Date(sig.blockTime * 1000).toISOString(),
+                    signature,
+                    new Date(blockTime * 1000).toISOString(),
                     transactionType,
                     transactionType === 'buy' ? totalSolAmount : 0,
                     transactionType === 'sell' ? totalSolAmount : 0,
@@ -392,10 +341,10 @@ class WalletMonitoringService {
                 );
                 await Promise.all(tokenSavePromises);
 
-                console.log(`[${new Date().toISOString()}] ✅ Successfully saved transaction ${sig.signature} as ${transactionType} with ${totalSolAmount.toFixed(6)} SOL`);
+                console.log(`[${new Date().toISOString()}] ✅ Successfully saved gRPC transaction ${signature} as ${transactionType} with ${totalSolAmount.toFixed(6)} SOL`);
 
                 return {
-                    signature: sig.signature,
+                    signature: signature,
                     type: transactionType,
                     solAmount: totalSolAmount,
                     usdcAmount,
@@ -403,8 +352,32 @@ class WalletMonitoringService {
                 };
             });
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing transaction ${sig.signature}:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction ${grpcData.signature}:`, error.message);
             return null;
+        }
+    }
+
+    async fetchSolPrice() {
+        const now = Date.now();
+        
+        if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
+            return this.solPriceCache.price;
+        }
+
+        try {
+            const priceData = await this.priceService.getSolPrice();
+            const newPrice = priceData.price || 150;
+
+            this.solPriceCache = {
+                price: newPrice,
+                lastUpdated: now,
+                cacheTimeout: 60000
+            };
+            
+            return newPrice;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
+            return this.solPriceCache.price; 
         }
     }
 
@@ -601,7 +574,7 @@ class WalletMonitoringService {
             let paramIndex = 1;
             
             if (groupId) {
-                query += ` AND w.group_id = $${paramIndex}::uuid`;
+                query += ` AND w.group_id = ${paramIndex}::uuid`;
                 params.push(groupId);
             }
             
