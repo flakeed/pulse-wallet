@@ -65,7 +65,6 @@ async connectStream() {
                 return false;
             }
             try {
-                new PublicKey(wallet);
                 return true;
             } catch (error) {
                 console.warn(`[${new Date().toISOString()}] ⚠️ Invalid Solana address: ${wallet}, Error: ${error.message}`);
@@ -106,6 +105,7 @@ async connectStream() {
         await new Promise((resolve, reject) => {
             this.stream.write(request, (err) => {
                 if (err) {
+                    console.error(`[${new Date().toISOString()}] ❌ gRPC write error:`, err, { request });
                     reject(err);
                 } else {
                     resolve();
@@ -125,7 +125,7 @@ async connectStream() {
         this.reconnectAttempts = 0;
         this.isConnecting = false;
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message);
+        console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message, { stack: error.stack });
         this.isConnecting = false;
         this.handleReconnect();
     }
