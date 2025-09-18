@@ -56,7 +56,6 @@ function CompactControls({
             className="bg-gray-700 border border-gray-600 text-white text-sm rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           >
             <option value="latest">Latest Activity</option>
-            <option value="newest">Newest Tokens</option>
             <option value="most_wallets">Most Wallets</option>
             <option value="profit">Profit</option>
             <option value="loss">Loss</option>

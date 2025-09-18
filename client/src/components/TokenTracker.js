@@ -50,7 +50,6 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
               totalReceivedSOL: 0,
               netSOL: 0,
               latestActivity: null,
-              oldestToken: null, 
             },
           });
         }
@@ -62,12 +61,6 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
 
         if (!tokenData.summary.latestActivity || txTime > new Date(tokenData.summary.latestActivity)) {
           tokenData.summary.latestActivity = tx.time;
-        }
-
-        if (token.deployment_time) {
-          if (!tokenData.summary.oldestToken || new Date(token.deployment_time) < new Date(tokenData.summary.oldestToken)) {
-            tokenData.summary.oldestToken = token.deployment_time;
-          }
         }
 
         if (!wallet) {
@@ -132,23 +125,12 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           return timeB - timeA;
         });
       
-      case 'newest':
-        return sortedTokens.sort((a, b) => {
-          const timeA = a.summary.oldestToken ? new Date(a.summary.oldestToken) : new Date(0);
-          const timeB = b.summary.oldestToken ? new Date(b.summary.oldestToken) : new Date(0);
-          
-          if (a.summary.oldestToken && !b.summary.oldestToken) return -1;
-          if (!a.summary.oldestToken && b.summary.oldestToken) return 1;
-          
-          return timeB - timeA;
-        });
-      
-      case 'most_wallets':
-        return sortedTokens.sort((a, b) => b.summary.uniqueWallets - a.summary.uniqueWallets);
-      
       case 'profit':
         return sortedTokens.sort((a, b) => b.summary.netSOL - a.summary.netSOL);
       
+ case 'most_wallets':
+        return sortedTokens.sort((a, b) => b.summary.uniqueWallets - a.summary.uniqueWallets);
+
       case 'loss':
         return sortedTokens.sort((a, b) => a.summary.netSOL - b.summary.netSOL);
       
