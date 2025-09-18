@@ -132,7 +132,13 @@ class SolanaGrpcService {
         if (!signature || this.processedTransactions.has(signature)) return;
         this.processedTransactions.add(signature);
 
-        console.log(`[${new Date().toISOString()}] 📝 Full transaction data for ${signature}:`, JSON.stringify(transactionData, null, 2));
+        console.log(`[${new Date().toISOString()}] 📝 Signature: ${signature}`);
+
+        // Track specific transaction
+        const isTargetTx = signature === '3eVLbMKNQM5MMMFZ9gmqK7SmmuAy6JWyWegkicYw48cAwNi5bWCGGsJV75yxmkVhuGZek2sm21mviJBPVLDiGmS9';
+        if (isTargetTx) {
+            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Starting processing`);
+        }
 
         let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
         if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
@@ -156,28 +162,74 @@ class SolanaGrpcService {
                 } else {
                     convertedKey = new PublicKey(Buffer.from(key)).toString();
                 }
-                if (convertedKey.length === 44) stringAccountKeys.push(convertedKey);
-            } catch (error) {}
+                if (convertedKey.length === 44) {
+                    stringAccountKeys.push(convertedKey);
+                } else if (isTargetTx) {
+                    console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Invalid key length ${convertedKey?.length || 'null'} for key:`, key);
+                }
+            } catch (error) {
+                if (isTargetTx) {
+                    console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Error converting key:`, error.message, 'Raw key:', key);
+                }
+            }
+        }
+
+        if (isTargetTx) {
+            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Found ${stringAccountKeys.length} valid accounts from ${accountKeys.length} raw keys`);
         }
 
         const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
-        if (!involvedWallet) return;
+        if (!involvedWallet) {
+            if (isTargetTx) {
+                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: No monitored wallets found in ${stringAccountKeys.length} accounts`);
+            }
+            return;
+        }
 
         const wallet = await this.db.getWalletByAddress(involvedWallet);
-        if (!wallet || (this.activeGroupId && wallet.group_id !== this.activeGroupId)) return;
+        if (!wallet) {
+            if (isTargetTx) {
+                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Wallet ${involvedWallet} not found in database`);
+            }
+            return;
+        }
+
+        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+            if (isTargetTx) {
+                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Wallet ${involvedWallet} belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
+            }
+            return;
+        }
 
         const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+        if (isTargetTx) {
+            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Matched wallet ${involvedWallet}, group ${wallet.group_id || 'none'}, blockTime ${blockTime}`);
+        }
+
         const formattedTransactionData = { transaction, meta, slot: transactionData.slot || 0, blockTime };
         const convertedTransaction = this.convertGrpcToLegacyFormat(formattedTransactionData, stringAccountKeys);
 
-        if (convertedTransaction) {
-            await this.monitoringService.processWebhookMessage({
-                signature,
-                walletAddress: involvedWallet,
-                blockTime,
-                groupId: wallet.group_id,
-                transactionData: convertedTransaction
-            });
+        if (!convertedTransaction) {
+            if (isTargetTx) {
+                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Failed to convert to legacy format`);
+            }
+            return;
+        }
+
+        if (isTargetTx) {
+            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Sending to webhook processor`);
+        }
+
+        await this.monitoringService.processWebhookMessage({
+            signature,
+            walletAddress: involvedWallet,
+            blockTime,
+            groupId: wallet.group_id,
+            transactionData: convertedTransaction
+        });
+
+        if (isTargetTx) {
+            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Completed webhook processing`);
         }
     }
 
