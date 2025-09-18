@@ -241,183 +241,84 @@ async handleGrpcMessage(data) {
 }
 async processTransaction(transactionData) {
     try {
-        if (this.messageCount <= 5) {
-            console.log(`[${new Date().toISOString()}] 🔍 DEBUG: Transaction data structure:`, JSON.stringify(Object.keys(transactionData || {}), null, 2));
-        }
-       
+        console.log(`[${new Date().toISOString()}] 🔍 TransactionData keys:`, Object.keys(transactionData || {}));
+        let accountKeys = [];
         let transaction = null;
         let meta = null;
-       
+
         if (transactionData.transaction && transactionData.meta) {
             transaction = transactionData.transaction;
             meta = transactionData.meta;
             console.log(`[${new Date().toISOString()}] ✅ Using format: transactionData.transaction + transactionData.meta`);
-        }
-        else if (transactionData.signatures && transactionData.message) {
+        } else if (transactionData.signatures && transactionData.message) {
             transaction = transactionData;
             meta = transactionData.meta || transactionData;
             console.log(`[${new Date().toISOString()}] ✅ Using format: direct transaction object`);
-        }
-        else if (transactionData.tx) {
+        } else if (transactionData.tx) {
             transaction = transactionData.tx.transaction || transactionData.tx;
             meta = transactionData.tx.meta || transactionData.meta;
             console.log(`[${new Date().toISOString()}] ✅ Using format: transactionData.tx`);
-        }
-        else if (transactionData.slot || transactionData.blockTime) {
+        } else if (transactionData.slot || transactionData.blockTime) {
             transaction = transactionData.transaction || transactionData;
             meta = transactionData.meta || transactionData;
             console.log(`[${new Date().toISOString()}] ✅ Using format: full transaction object`);
-        }
-        else {
-            if (this.messageCount <= 10) {
-                console.log(`[${new Date().toISOString()}] ⚠️ Unknown transaction format. Keys:`, Object.keys(transactionData || {}));
-                console.log(`[${new Date().toISOString()}] 🔍 Sample data:`, JSON.stringify(transactionData, null, 2));
-            }
+        } else {
+            console.log(`[${new Date().toISOString()}] ⚠️ Unknown transaction format. Keys:`, Object.keys(transactionData || {}));
             return;
         }
-       
-        if (!transaction) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no transaction data found`);
-            return;
-        }
-       
-        if (!meta) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no meta data found`);
-            return;
-        }
-       
-        if (meta.err) {
-            if (this.messageCount <= 5) {
-                console.log(`[${new Date().toISOString()}] ⏭️ Skipping: transaction failed with error:`, meta.err);
-            }
-            return;
-        }
-       
-        let signature = null;
-        if (transaction.signatures && transaction.signatures.length > 0) {
-            signature = transaction.signatures[0];
-        } else if (transaction.signature) {
-            signature = transaction.signature;
-        } else if (transactionData.signature) {
-            signature = transactionData.signature;
-        }
-       
-        if (!signature) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping: no signature found`);
-            return;
-        }
-       
-        if (typeof signature !== 'string') {
-            if (Buffer.isBuffer(signature)) {
-                signature = signature.toString('base64');
-            } else {
-                signature = signature.toString();
-            }
-        }
-       
-        if (this.processedTransactions.has(signature)) {
-            return;
-        }
-        this.processedTransactions.add(signature);
-       
-        console.log(`[${new Date().toISOString()}] 🎯 Processing transaction with signature: ${signature.slice(0, 8)}...`);
-       
-        let accountKeys = [];
-       
-        if (this.messageCount <= 5) {
-            console.log(`[${new Date().toISOString()}] 🔍 DETAILED DEBUG - Transaction structure:`, JSON.stringify(transaction, null, 2));
-            console.log(`[${new Date().toISOString()}] 🔍 DETAILED DEBUG - Meta structure:`, JSON.stringify(meta, null, 2));
-            console.log(`[${new Date().toISOString()}] 🔍 DETAILED DEBUG - TransactionData structure:`, JSON.stringify(Object.keys(transactionData), null, 2));
-        }
-       
-        if (transaction.message && transaction.message.accountKeys) {
+
+        if (transaction.message?.accountKeys) {
             accountKeys = transaction.message.accountKeys;
             console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transaction.message.accountKeys: ${accountKeys.length} keys`);
-        } else if (transaction.accountKeys) {
-            accountKeys = transaction.accountKeys;
-            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transaction.accountKeys: ${accountKeys.length} keys`);
-        } else if (transactionData.accountKeys) {
-            accountKeys = transactionData.accountKeys;
-            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transactionData.accountKeys: ${accountKeys.length} keys`);
-        } else if (meta.accountKeys) {
-            accountKeys = meta.accountKeys;
-            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in meta.accountKeys: ${accountKeys.length} keys`);
-        } else if (transaction.message && transaction.message.account_keys) {
-            accountKeys = transaction.message.account_keys;
-            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transaction.message.account_keys: ${accountKeys.length} keys`);
+        } else if (transaction.message?.accounts) {
+            accountKeys = transaction.message.accounts;
+            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transaction.message.accounts: ${accountKeys.length} keys`);
+        } else if (transaction.accounts) {
+            accountKeys = transaction.accounts;
+            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transaction.accounts: ${accountKeys.length} keys`);
+        } else if (transactionData.accounts) {
+            accountKeys = transactionData.accounts;
+            console.log(`[${new Date().toISOString()}] ✅ Found accountKeys in transactionData.accounts: ${accountKeys.length} keys`);
         } else {
-            console.log(`[${new Date().toISOString()}] ❌ No accountKeys found! Available fields:`);
-            console.log(`[${new Date().toISOString()}] 📝 transaction keys:`, Object.keys(transaction || {}));
-            if (transaction.message) {
-                console.log(`[${new Date().toISOString()}] 📝 transaction.message keys:`, Object.keys(transaction.message || {}));
-            }
-            console.log(`[${new Date().toISOString()}] 📝 meta keys:`, Object.keys(meta || {}));
-            console.log(`[${new Date().toISOString()}] 📝 transactionData keys:`, Object.keys(transactionData || {}));
-           
+            console.log(`[${new Date().toISOString()}] ❌ No accountKeys found! Searching for account-related fields...`);
             const findAccountFields = (obj, prefix = '') => {
                 for (const [key, value] of Object.entries(obj || {})) {
-                    if (key.toLowerCase().includes('account')) {
-                        console.log(`[${new Date().toISOString()}] 🔍 Found account-related field: ${prefix}${key}`, Array.isArray(value) ? `[array with ${value.length} items]` : typeof value);
+                    if (key.toLowerCase().includes('account') || key.toLowerCase().includes('key')) {
+                        console.log(`[${new Date().toISOString()}] 🔍 Found potential account field: ${prefix}${key}`, Array.isArray(value) ? `[array with ${value.length} items]` : typeof value);
                     }
                     if (typeof value === 'object' && value !== null && !Array.isArray(value) && prefix.length < 20) {
                         findAccountFields(value, `${prefix}${key}.`);
                     }
                 }
             };
-           
+            findAccountFields(transactionData, 'transactionData.');
             findAccountFields(transaction, 'transaction.');
             findAccountFields(meta, 'meta.');
-            findAccountFields(transactionData, 'transactionData.');
         }
-       
+
         const stringAccountKeys = [];
-       
         if (accountKeys.length > 0) {
             console.log(`[${new Date().toISOString()}] 🔄 Converting ${accountKeys.length} account keys...`);
-           
             for (let i = 0; i < accountKeys.length; i++) {
                 const key = accountKeys[i];
                 let convertedKey = null;
-               
                 try {
                     if (typeof key === 'string') {
                         convertedKey = key;
-                        if (this.messageCount <= 3) {
-                            console.log(`[${new Date().toISOString()}] 📝 Key ${i}: string -> ${convertedKey.slice(0, 8)}...`);
-                        }
                     } else if (Buffer.isBuffer(key)) {
                         const { PublicKey } = require('@solana/web3.js');
                         convertedKey = new PublicKey(key).toString();
-                        if (this.messageCount <= 3) {
-                            console.log(`[${new Date().toISOString()}] 📝 Key ${i}: Buffer -> ${convertedKey.slice(0, 8)}...`);
-                        }
                     } else if (key && typeof key === 'object') {
-                        if (key.pubkey) {
-                            convertedKey = key.pubkey.toString();
-                        } else if (key.key) {
-                            convertedKey = key.key.toString();
-                        } else if (key.address) {
-                            convertedKey = key.address.toString();
-                        } else {
-                            console.log(`[${new Date().toISOString()}] ❓ Key ${i} is object with fields:`, Object.keys(key));
-                            convertedKey = key.toString();
-                        }
-                        if (this.messageCount <= 3) {
-                            console.log(`[${new Date().toISOString()}] 📝 Key ${i}: object -> ${convertedKey.slice(0, 8)}...`);
-                        }
+                        if (key.pubkey) convertedKey = key.pubkey.toString();
+                        else if (key.key) convertedKey = key.key.toString();
+                        else if (key.address) convertedKey = key.address.toString();
+                        else convertedKey = key.toString();
                     } else if (Array.isArray(key)) {
                         const { PublicKey } = require('@solana/web3.js');
                         convertedKey = new PublicKey(Buffer.from(key)).toString();
-                        if (this.messageCount <= 3) {
-                            console.log(`[${new Date().toISOString()}] 📝 Key ${i}: array -> ${convertedKey.slice(0, 8)}...`);
-                        }
                     } else {
                         convertedKey = key.toString();
-                        if (this.messageCount <= 3) {
-                            console.log(`[${new Date().toISOString()}] 📝 Key ${i}: ${typeof key} -> ${convertedKey.slice(0, 8)}...`);
-                        }
                     }
-                   
                     if (convertedKey && convertedKey.length >= 32) {
                         stringAccountKeys.push(convertedKey);
                     } else {
@@ -425,82 +326,13 @@ async processTransaction(transactionData) {
                     }
                 } catch (error) {
                     console.error(`[${new Date().toISOString()}] ❌ Error converting key ${i}:`, error.message);
-                    console.log(`[${new Date().toISOString()}] 📝 Raw key ${i}:`, key);
                 }
             }
         }
-       
+
         console.log(`[${new Date().toISOString()}] 🔍 Transaction has ${stringAccountKeys.length} valid accounts (from ${accountKeys.length} raw keys)`);
-       
-        if (stringAccountKeys.length > 0 && this.messageCount <= 3) {
-            console.log(`[${new Date().toISOString()}] 📝 First 3 converted account keys:`, stringAccountKeys.slice(0, 3).map(k => `${k.slice(0,8)}...`));
-        }
-       
-        let involvedWallet = null;
-        for (const walletAddress of this.monitoredWallets) {
-            if (stringAccountKeys.includes(walletAddress)) {
-                involvedWallet = walletAddress;
-                console.log(`[${new Date().toISOString()}] ✅ Found monitored wallet ${walletAddress.slice(0,8)}... in transaction ${signature.slice(0, 8)}...`);
-                break;
-            }
-        }
-       
-        if (!involvedWallet) {
-            if (this.messageCount <= 10) {
-                console.log(`[${new Date().toISOString()}] ⏭️ No monitored wallets in transaction ${signature.slice(0, 8)}...`);
-                console.log(`[${new Date().toISOString()}] 📝 Transaction accounts (first 3):`, stringAccountKeys.slice(0, 3).map(k => `${k.slice(0,8)}...`));
-                console.log(`[${new Date().toISOString()}] 📝 Monitored wallets (first 3):`, Array.from(this.monitoredWallets).slice(0, 3).map(k => `${k.slice(0,8)}...`));
-            }
-            return;
-        }
-       
-        const wallet = await this.db.getWalletByAddress(involvedWallet);
-        if (!wallet) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${involvedWallet} not found in database`);
-            return;
-        }
-       
-        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-            console.log(`[${new Date().toISOString()}] ⏭️ Skipping transaction ${signature.slice(0, 8)}... - wallet belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
-            return;
-        }
-       
-        let blockTime;
-        if (transactionData.blockTime) {
-            blockTime = Number(transactionData.blockTime);
-        } else if (transactionData.slot) {
-            blockTime = Math.floor(Date.now() / 1000);
-        } else {
-            blockTime = Math.floor(Date.now() / 1000);
-        }
-       
-        console.log(`[${new Date().toISOString()}] 🎯 Processing valid transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
-       
-        const formattedTransactionData = {
-            transaction: transaction,
-            meta: meta,
-            slot: transactionData.slot || 0,
-            blockTime: blockTime
-        };
-       
-        const convertedTransaction = this.convertGrpcToLegacyFormat(formattedTransactionData, stringAccountKeys);
-       
-        if (!convertedTransaction) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Failed to convert transaction format for ${signature.slice(0, 8)}...`);
-            return;
-        }
-       
-        await this.monitoringService.processWebhookMessage({
-            signature: signature,
-            walletAddress: involvedWallet,
-            blockTime: blockTime,
-            groupId: wallet.group_id,
-            transactionData: convertedTransaction
-        });
-       
     } catch (error) {
         console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
-        console.error(`[${new Date().toISOString()}] 📋 Error stack:`, error.stack);
     }
 }
 convertGrpcToLegacyFormat(grpcData, accountKeys) {
