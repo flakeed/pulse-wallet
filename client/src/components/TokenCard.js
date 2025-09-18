@@ -1,9 +1,52 @@
-import React, { useState } from 'react';
-import { useTokenData } from '../hooks/usePrices';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useTokenData, useSolPrice } from '../hooks/usePrices';
+import { calculateTokenPnL, formatPnL, getPnLColor, formatNumber } from '../utils/pnlCalculator';
 
-function TokenCard({ token }) {
+function TokenCard({ token, onOpenChart }) {
   const [showDetails, setShowDetails] = useState(true);
+  const [showAllWallets, setShowAllWallets] = useState(false);
+  const { solPrice, loading: solLoading } = useSolPrice();
   const { tokenData: data, loading, error } = useTokenData(token.mint);
+
+  const WALLETS_DISPLAY_LIMIT = 3;
+
+  const groupPnL = useMemo(() => {
+    if (!data || !data.price || !solPrice || loading) {
+      return null;
+    }
+
+    
+    const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
+    
+    const PnL = {
+      ...calculatedPnL,
+      realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
+      unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
+      currentPriceUSD: data.price,
+      currentPriceSOL: data.priceInSol || (data.price / solPrice),
+      marketCap: data.marketCap,
+      holdingPercentage: 100 - calculatedPnL.soldPercentage
+    };
+
+    
+    return PnL;
+  }, [data, solPrice, token.wallets, loading, token.symbol]);
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  const openGmgnChart = () => {
+    if (!token.mint) return;
+    const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(token.mint)}`;
+    window.open(gmgnUrl, '_blank');
+  };
+
+  const openGmgnMaker = (walletAddress) => {
+    if (!walletAddress || !token.mint) return;
+    const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(token.mint)}?maker=${encodeURIComponent(walletAddress)}`;
+    window.open(gmgnUrl, '_blank');
+  };
 
   const formatAge = (ageData) => {
     if (!ageData || !ageData.ageInHours) return 'Unknown';
@@ -34,21 +77,31 @@ function TokenCard({ token }) {
     return `${years}y`;
   };
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
+  const handleShowAllWallets = (event) => {
+    event.preventDefault(); 
+    event.stopPropagation();
+    setShowAllWallets(true);
   };
 
-  const openGmgnChart = () => {
-    if (!token.mint) return;
-    const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(token.mint)}`;
-    window.open(gmgnUrl, '_blank');
+  const handleHideWallets = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setShowAllWallets(false);
   };
 
+  const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  
   const isNewToken = data?.age?.isNew || false;
   const tokenAge = data?.age || null;
   const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
   const deploymentTime = tokenAge?.createdAt;
-  const formattedCreationTime = deploymentTime ? new Date(deploymentTime).toLocaleString() : 'Unknown';
+
+  const displayPnL = groupPnL?.totalPnLSOL || 0;
+  const displayPrice = data?.price || 0;
+  const displayMarketCap = data?.marketCap || 0;
+
+  const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
+  const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
 
   return (
     <div className="bg-gray-900 border border-gray-700 hover:border-gray-600 transition-colors">
@@ -82,10 +135,28 @@ function TokenCard({ token }) {
                     d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
               </button>
-              <span className="text-xs text-gray-500" title={formattedCreationTime}>
+              <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
                 {formattedAge}
               </span>
             </div>
+          </div>
+
+          <div className="text-right">
+            <div className={`text-sm font-bold ${netColor} flex items-center`}>
+              {(loading || solLoading) && (
+                <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
+              )}
+              {formatPnL(displayPnL)}
+            </div>
+            
+            <div className="text-xs text-gray-500">
+              {token.summary.uniqueWallets}W · {token.summary.totalBuys}B · {token.summary.totalSells}S
+            </div>
+            {!loading && displayPrice > 0 && (
+              <div className="text-xs text-blue-400">
+                ${formatNumber(displayPrice, 8)} · MC: ${formatNumber(displayMarketCap)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -130,19 +201,148 @@ function TokenCard({ token }) {
           )}
 
           {data && !loading && (
-            <div className="mb-3 text-xs">
-              <div className="text-gray-400 mb-1">Created</div>
-              <div className="text-white font-medium">
-                {formattedCreationTime}
-                {isNewToken && (
-                  <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
-                )}
-                <div className="text-gray-500 text-xs">
+            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+              <div>
+                <div className="text-gray-400 mb-1">Price</div>
+                <div className="text-white font-medium">
+                  ${displayPrice?.toFixed(8) || 'N/A'}
+                  <div className="text-gray-500 text-xs">
+                    {data.priceInSol?.toFixed(8) || 'N/A'} SOL
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Market Cap</div>
+                <div className="text-white font-medium">
+                  ${formatNumber(displayMarketCap)}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Age</div>
+                <div className="text-white font-medium">
                   {formattedAge}
+                  {isNewToken && (
+                    <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
+                  )}
+                  {deploymentTime && (
+                    <div className="text-gray-500 text-xs">
+                      {new Date(deploymentTime).toLocaleDateString()}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           )}
+
+          {groupPnL && (
+            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+              <div>
+                <div className="text-gray-400 mb-1">Holdings</div>
+                <div className="text-white font-medium">
+                  {formatNumber(groupPnL.currentHoldings, 0)} tokens
+                  <span className="text-gray-500 ml-1">
+                    ({groupPnL.holdingPercentage.toFixed(1)}%)
+                  </span>
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Total Spent/Received</div>
+                <div className="text-white font-medium">
+                  {groupPnL.totalSpentSOL.toFixed(4)} / {groupPnL.totalReceivedSOL.toFixed(4)} SOL
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Realized PnL</div>
+                <div className={`font-medium ${getPnLColor(groupPnL.realizedPnLSOL)}`}>
+                  {formatPnL(groupPnL.realizedPnLSOL)}
+                  <div className="text-xs text-gray-500">
+                    ${formatNumber(groupPnL.realizedPnLUSD)}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Unrealized PnL</div>
+                <div className={`font-medium ${getPnLColor(groupPnL.unrealizedPnLSOL)}`}>
+                  {formatPnL(groupPnL.unrealizedPnLSOL)}
+                  <div className="text-xs text-gray-500">
+                    ${formatNumber(groupPnL.unrealizedPnLUSD)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-gray-400 text-xs mb-2">
+              <span>Top Wallets</span>
+              {hasMoreWallets && (
+                <span className="text-gray-500">
+                  {showAllWallets ? 'All' : `${WALLETS_DISPLAY_LIMIT} of ${token.wallets.length}`}
+                </span>
+              )}
+            </div>
+            
+            {walletsToShow.map((wallet, index) => {
+              const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
+              const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
+              
+              return (
+                <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-gray-300 font-medium">
+                      {wallet.name || `${wallet.address.slice(0, 4)}...${wallet.address.slice(-4)}`}
+                    </span>
+                    <span className="text-gray-500">
+                      {wallet.txBuys}B · {wallet.txSells}S
+                    </span>
+                    <button
+                      onClick={() => copyToClipboard(wallet.address)}
+                      className="text-gray-500 hover:text-blue-400 transition-colors"
+                      title="Copy wallet address"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => openGmgnMaker(wallet.address)}
+                      className="text-gray-500 hover:text-blue-400 transition-colors"
+                      title="View on GMGN"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className={`font-medium ${getPnLColor(displayWalletPnL)}`}>
+                    {formatPnL(displayWalletPnL)}
+                  </div>
+                </div>
+              );
+            })}
+            
+            {hasMoreWallets && (
+              <div className="text-center mt-2">
+                {!showAllWallets ? (
+                  <button
+                    onClick={handleShowAllWallets} 
+                    className="text-blue-400 hover:text-blue-300 text-xs underline transition-colors"
+                  >
+                    +{token.wallets.length - WALLETS_DISPLAY_LIMIT} more wallets
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleHideWallets} 
+                    className="text-gray-500 hover:text-gray-400 text-xs underline transition-colors"
+                  >
+                    Show less
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="flex space-x-2 mt-3">
             <button
