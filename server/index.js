@@ -3,26 +3,28 @@ const cors = require('cors');
 const https = require('https');
 const fs = require('fs');
 require('dotenv').config();
-const WalletMonitoringService = require('./src/services/monitoringService');
+
 const Database = require('./src/database/connection');
 const SolanaGrpcService = require('./src/services/solanaGrpcService');
 const AuthMiddleware = require('./middleware/authMiddleware');
 const PriceService = require('./src/services/priceService');
 const { redis } = require('./src/services/tokenService');
+
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const walletRoutes = require('./routes/walletsRoutes');
 const transactionRoutes = require('./routes/transactionsRoutes');
 const miscRoutes = require('./routes/miscRoutes');
 const groupRoutes = require('./routes/groupsRoutes');
+
 const errorHandler = require('./middleware/errorHandler');
+
 const { startGrpcService } = require('./utils/grpcStarter');
 const { startSessionCleaner } = require('./utils/sessionCleaner');
 
 const app = express();
 const port = process.env.PORT || 5001;
 
-const monitoringService = new WalletMonitoringService();
 const solanaGrpcService = new SolanaGrpcService();
 const db = new Database();
 const auth = new AuthMiddleware(db);
@@ -35,16 +37,18 @@ const sslOptions = {
 };
 
 app.use(express.json({ 
-  limit: '50mb',
+  limit: '100mb', 
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
+
 app.use(express.urlencoded({ 
-  limit: '50mb', 
+  limit: '100mb', 
   extended: true,
-  parameterLimit: 50000
+  parameterLimit: 100000 
 }));
+
 app.use(cors({
   origin: [
     'http://localhost:3000',
@@ -56,9 +60,10 @@ app.use(cors({
   ],
   optionsSuccessStatus: 200,
 }));
+
 app.use((req, res, next) => {
-  req.setTimeout(300000); 
-  res.setTimeout(300000);
+  req.setTimeout(600000);
+  res.setTimeout(600000);
   next();
 });
 
@@ -68,20 +73,20 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     const hours = parseInt(req.query.hours) || 24;
     const transactionType = req.query.type;
     
-    console.log(`[${new Date().toISOString()}] 🚀 App initialization${groupId ? ` for group ${groupId}` : ''}`);
+    console.log(`[${new Date().toISOString()}] 🚀 Optimized app initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
     const startTime = Date.now();
     
-    const [walletCounts, transactions, monitoringStatus, groups] = await Promise.all([
+    const [walletCounts, transactions, groups] = await Promise.all([
       db.getWalletCount(groupId),
       db.getRecentTransactionsOptimized(hours, 4000, transactionType, groupId),
-      db.getMonitoringStatus(groupId),
       db.getGroups()
     ]);
     
     const grpcStatus = solanaGrpcService.getStatus();
+    const performanceStats = solanaGrpcService.getPerformanceStats();
     
     const duration = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] ⚡ Global initialization completed in ${duration}ms`);
+    console.log(`[${new Date().toISOString()}] ⚡ Optimized initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
     
     res.json({
       success: true,
@@ -94,29 +99,120 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         },
         transactions,
         monitoring: {
-          isMonitoring: grpcStatus.isConnected,
+          isMonitoring: grpcStatus.isConnected && grpcStatus.isStarted,
           processedSignatures: grpcStatus.messageCount,
-          activeWallets: parseInt(monitoringStatus.active_wallets) || 0,
+          activeWallets: performanceStats.monitoredWallets,
           activeGroupId: grpcStatus.activeGroupId,
-          todayStats: {
-            buyTransactions: parseInt(monitoringStatus.buy_transactions_today) || 0,
-            sellTransactions: parseInt(monitoringStatus.sell_transactions_today) || 0,
-            solSpent: Number(monitoringStatus.sol_spent_today || 0).toFixed(6),
-            solReceived: Number(monitoringStatus.sol_received_today || 0).toFixed(6),
-            uniqueTokens: parseInt(monitoringStatus.unique_tokens_today) || 0
+          mode: 'optimized_grpc',
+          performance: {
+            messagesProcessed: performanceStats.messagesProcessed,
+            cacheStats: performanceStats.solPriceCache,
+            batchSize: performanceStats.currentBatchSize,
+            isHealthy: performanceStats.isHealthy
           }
         },
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'GLOBAL_GRPC'
+          optimizationLevel: 'OPTIMIZED_GRPC_V2',
+          cacheHits: {
+            solPrice: performanceStats.solPriceCache.ageMs < 60000,
+            processedTransactions: performanceStats.processedTransactionsCache,
+            recentlyProcessed: performanceStats.recentlyProcessedCache
+          }
         }
       }
     });
     
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] ❌ Error in global initialization:`, error);
-    res.status(500).json({ error: 'Failed to initialize application data' });
+    console.error(`[${new Date().toISOString()}] ❌ Error in optimized initialization:`, error);
+    res.status(500).json({ 
+      error: 'Failed to initialize application data',
+      details: error.message,
+      optimization: 'OPTIMIZED_GRPC_V2'
+    });
+  }
+});
+
+app.get('/api/health', (req, res) => {
+  const grpcStatus = solanaGrpcService.getStatus();
+  const performanceStats = solanaGrpcService.getPerformanceStats();
+  
+  res.json({ 
+    status: 'ok', 
+    message: 'Optimized backend running with gRPC v2',
+    timestamp: new Date().toISOString(),
+    grpc: {
+      connected: grpcStatus.isConnected,
+      started: grpcStatus.isStarted,
+      activeGroup: grpcStatus.activeGroupId,
+      monitoredWallets: grpcStatus.subscriptions,
+      messageCount: grpcStatus.messageCount,
+      reconnectAttempts: grpcStatus.reconnectAttempts,
+      mode: grpcStatus.mode
+    },
+    performance: {
+      messagesProcessed: performanceStats.messagesProcessed,
+      caches: {
+        processedTransactions: performanceStats.processedTransactionsCache,
+        recentlyProcessed: performanceStats.recentlyProcessedCache,
+        solPrice: {
+          cached: performanceStats.solPriceCache.lastUpdated > 0,
+          price: performanceStats.solPriceCache.price,
+          ageMs: performanceStats.solPriceCache.ageMs
+        }
+      },
+      batch: {
+        currentSize: performanceStats.currentBatchSize,
+        isHealthy: performanceStats.isHealthy
+      }
+    },
+    optimization: 'GRPC_V2_WITH_CACHING'
+  });
+});
+
+app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) => {
+  const performanceStats = solanaGrpcService.getPerformanceStats();
+  const grpcStatus = solanaGrpcService.getStatus();
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    grpc: grpcStatus,
+    performance: performanceStats,
+    system: {
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      pid: process.pid,
+      version: process.version
+    },
+    optimization: {
+      level: 'OPTIMIZED_GRPC_V2',
+      features: [
+        'Redis caching',
+        'Transaction batching',
+        'Memory optimization',
+        'Duplicate prevention',
+        'Automatic cache cleanup'
+      ]
+    }
+  });
+});
+
+app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) => {
+  try {
+    solanaGrpcService.clearCaches();
+    res.json({
+      success: true,
+      message: 'Caches cleared successfully',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] ❌ Error clearing caches:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to clear caches',
+      details: error.message
+    });
   }
 });
 
@@ -129,28 +225,60 @@ app.use('/api/groups', groupRoutes(auth, db, solanaGrpcService));
 
 app.use(errorHandler);
 
-process.on('SIGINT', async () => {
-  console.log(`[${new Date().toISOString()}] 🛑 Shutting down server...`);
-  await monitoringService.close();
-  await solanaGrpcService.shutdown();
-  await priceService.close();
-  await redis.quit();
-  sseClients.forEach((client) => client.end());
-  process.exit(0);
+const gracefulShutdown = async (signal) => {
+  console.log(`[${new Date().toISOString()}] 🛑 Received ${signal}, shutting down gracefully...`);
+  
+  try {
+    console.log(`[${new Date().toISOString()}] 🔄 Stopping optimized gRPC service...`);
+    await solanaGrpcService.shutdown();
+    
+    console.log(`[${new Date().toISOString()}] 🔄 Stopping other services...`);
+    await Promise.all([
+      priceService.close(),
+      redis.quit()
+    ]);
+    
+    console.log(`[${new Date().toISOString()}] 🔄 Closing SSE connections...`);
+    sseClients.forEach((client) => {
+      try {
+        client.end();
+      } catch (error) {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Error closing SSE client:`, error.message);
+      }
+    });
+    sseClients.clear();
+    
+    console.log(`[${new Date().toISOString()}] ✅ Graceful shutdown completed`);
+    process.exit(0);
+    
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] ❌ Error during shutdown:`, error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] ❌ Unhandled rejection at:`, promise, 'reason:', reason);
 });
 
-process.on('SIGTERM', async () => {
-  console.log(`[${new Date().toISOString()}] 🛑 Shutting down server...`);
-  await monitoringService.close();
-  await solanaGrpcService.shutdown();
-  await redis.quit();
-  sseClients.forEach((client) => client.end());
-  process.exit(0);
+process.on('uncaughtException', (error) => {
+  console.error(`[${new Date().toISOString()}] ❌ Uncaught exception:`, error);
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
 
-setTimeout(startGrpcService(solanaGrpcService), 2000);
+console.log(`[${new Date().toISOString()}] 🚀 Starting optimized wallet monitoring server...`);
+
+setTimeout(() => {
+  startGrpcService(solanaGrpcService)();
+}, 3000);
+
 startSessionCleaner(auth);
 
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Global wallet monitoring server running on https://0.0.0.0:${port} with gRPC`);
+  console.log(`[${new Date().toISOString()}] 🚀 Optimized global wallet monitoring server running on https://0.0.0.0:${port}`);
+  console.log(`[${new Date().toISOString()}] 🔧 Optimizations enabled: Redis caching, transaction batching, memory management`);
+  console.log(`[${new Date().toISOString()}] 📊 Ready to handle 500k+ wallets with gRPC v2`);
 });
