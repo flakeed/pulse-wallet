@@ -5,32 +5,30 @@ import { calculateTokenPnL, formatPnL, getPnLColor, formatNumber } from '../util
 function TokenCard({ token, onOpenChart }) {
   const [showDetails, setShowDetails] = useState(true);
   const [showAllWallets, setShowAllWallets] = useState(false);
-  const { solPrice, loading: solLoading } = useSolPrice();
-  const { tokenData: data, loading, error } = useTokenData(token.mint);
+  // const { solPrice, loading: solLoading } = useSolPrice();
+  // const { tokenData: data, loading, error } = useTokenData(token.mint);
 
   const WALLETS_DISPLAY_LIMIT = 3;
 
-  const groupPnL = useMemo(() => {
-    if (!data || !data.price || !solPrice || loading) {
-      return null;
-    }
+  // const groupPnL = useMemo(() => {
+  //   if (!data || !data.price || !solPrice || loading) {
+  //     return null;
+  //   }
 
+  //   const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
     
-    const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
-    
-    const PnL = {
-      ...calculatedPnL,
-      realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
-      unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
-      currentPriceUSD: data.price,
-      currentPriceSOL: data.priceInSol || (data.price / solPrice),
-      marketCap: data.marketCap,
-      holdingPercentage: 100 - calculatedPnL.soldPercentage
-    };
+  //   const PnL = {
+  //     ...calculatedPnL,
+  //     realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
+  //     unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
+  //     currentPriceUSD: data.price,
+  //     currentPriceSOL: data.priceInSol || (data.price / solPrice),
+  //     marketCap: data.marketCap,
+  //     holdingPercentage: 100 - calculatedPnL.soldPercentage
+  //   };
 
-    
-    return PnL;
-  }, [data, solPrice, token.wallets, loading, token.symbol]);
+  //   return PnL;
+  // }, [data, solPrice, token.wallets, loading, token.symbol]);
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -48,34 +46,34 @@ function TokenCard({ token, onOpenChart }) {
     window.open(gmgnUrl, '_blank');
   };
 
-  const formatAge = (ageData) => {
-    if (!ageData || !ageData.ageInHours) return 'Unknown';
+  // const formatAge = (ageData) => {
+  //   if (!ageData || !ageData.ageInHours) return 'Unknown';
     
-    const ageInHours = ageData.ageInHours;
+  //   const ageInHours = ageData.ageInHours;
     
-    if (ageInHours < 1) {
-      const minutes = Math.floor(ageInHours * 60);
-      return `${minutes}m`;
-    }
+  //   if (ageInHours < 1) {
+  //     const minutes = Math.floor(ageInHours * 60);
+  //     return `${minutes}m`;
+  //   }
     
-    if (ageInHours < 24) {
-      const hours = Math.floor(ageInHours);
-      return `${hours}h`;
-    }
+  //   if (ageInHours < 24) {
+  //     const hours = Math.floor(ageInHours);
+  //     return `${hours}h`;
+  //   }
     
-    const days = Math.floor(ageInHours / 24);
-    if (days < 30) {
-      return `${days}d`;
-    }
+  //   const days = Math.floor(ageInHours / 24);
+  //   if (days < 30) {
+  //     return `${days}d`;
+  //   }
     
-    const months = Math.floor(days / 30);
-    if (months < 12) {
-      return `${months}mo`;
-    }
+  //   const months = Math.floor(days / 30);
+  //   if (months < 12) {
+  //     return `${months}mo`;
+  //   }
     
-    const years = Math.floor(days / 365);
-    return `${years}y`;
-  };
+  //   const years = Math.floor(days / 365);
+  //   return `${years}y`;
+  // };
 
   const handleShowAllWallets = (event) => {
     event.preventDefault(); 
@@ -89,16 +87,20 @@ function TokenCard({ token, onOpenChart }) {
     setShowAllWallets(false);
   };
 
-  const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  // const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
+  const netColor = 'text-gray-400';
   
-  const isNewToken = data?.age?.isNew || false;
-  const tokenAge = data?.age || null;
-  const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
-  const deploymentTime = tokenAge?.createdAt;
+  // const isNewToken = data?.age?.isNew || false;
+  // const tokenAge = data?.age || null;
+  // const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
+  // const deploymentTime = tokenAge?.createdAt;
 
-  const displayPnL = groupPnL?.totalPnLSOL || 0;
-  const displayPrice = data?.price || 0;
-  const displayMarketCap = data?.marketCap || 0;
+  // const displayPnL = groupPnL?.totalPnLSOL || 0;
+  const displayPnL = 0;
+  // const displayPrice = data?.price || 0;
+  const displayPrice = 0;
+  // const displayMarketCap = data?.marketCap || 0;
+  const displayMarketCap = 0;
 
   const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
@@ -112,11 +114,11 @@ function TokenCard({ token, onOpenChart }) {
               <span className="bg-blue-600 text-white text-xs font-bold px-2 py-0.5 rounded">
                 {token.symbol || 'UNK'}
               </span>
-              {isNewToken && (
+              {/* {isNewToken && (
                 <span className="bg-red-600 text-white text-xs font-bold px-2 py-0.5 rounded animate-pulse">
                   NEW
                 </span>
-              )}
+              )} */}
               <span className="text-gray-300 text-sm truncate">
                 {token.name || 'Unknown Token'}
               </span>
@@ -135,28 +137,29 @@ function TokenCard({ token, onOpenChart }) {
                     d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
               </button>
-              <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
+              {/* <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
                 {formattedAge}
-              </span>
+              </span> */}
+              <span className="text-xs text-gray-500">Unknown</span>
             </div>
           </div>
 
           <div className="text-right">
             <div className={`text-sm font-bold ${netColor} flex items-center`}>
-              {(loading || solLoading) && (
+              {/* {(loading || solLoading) && (
                 <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
-              )}
+              )} */}
               {formatPnL(displayPnL)}
             </div>
             
             <div className="text-xs text-gray-500">
               {token.summary.uniqueWallets}W · {token.summary.totalBuys}B · {token.summary.totalSells}S
             </div>
-            {!loading && displayPrice > 0 && (
+            {/* {!loading && displayPrice > 0 && (
               <div className="text-xs text-blue-400">
                 ${formatNumber(displayPrice, 8)} · MC: ${formatNumber(displayMarketCap)}
               </div>
-            )}
+            )} */}
           </div>
         </div>
 
@@ -186,7 +189,7 @@ function TokenCard({ token, onOpenChart }) {
 
       {showDetails && (
         <div className="p-3 bg-gray-800/50">
-          {loading && (
+          {/* {loading && (
             <div className="flex items-center justify-center py-4">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mr-3"></div>
               <span className="text-gray-400">Loading data...</span>
@@ -232,9 +235,9 @@ function TokenCard({ token, onOpenChart }) {
                 </div>
               </div>
             </div>
-          )}
+          )} */}
 
-          {groupPnL && (
+          {/* {groupPnL && (
             <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
               <div>
                 <div className="text-gray-400 mb-1">Holdings</div>
@@ -270,7 +273,7 @@ function TokenCard({ token, onOpenChart }) {
                 </div>
               </div>
             </div>
-          )}
+          )} */}
 
           <div className="space-y-1">
             <div className="flex items-center justify-between text-gray-400 text-xs mb-2">
@@ -283,8 +286,9 @@ function TokenCard({ token, onOpenChart }) {
             </div>
             
             {walletsToShow.map((wallet, index) => {
-              const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
-              const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
+              // const walletPnL = groupPnL?.walletPnLs?.find(wp => wp.address === wallet.address)?.pnl;
+              // const displayWalletPnL = walletPnL?.totalPnLSOL || wallet.pnlSol || 0;
+              const displayWalletPnL = wallet.pnlSol || 0;
               
               return (
                 <div key={wallet.address} className="flex items-center justify-between bg-gray-900/50 p-2 rounded text-xs">
