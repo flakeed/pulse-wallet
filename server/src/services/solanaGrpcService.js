@@ -17,6 +17,7 @@ class SolanaGrpcService {
         this.maxReconnectAttempts = 10;
         this.reconnectAttempts = 0;
         this.messageCount = 0;
+        this.tpsStartTime = null;
         this.activeGroupId = null;
         this.monitoredWallets = new Set();
         this.processedTransactions = new Set();
@@ -52,12 +53,13 @@ class SolanaGrpcService {
         console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC endpoint: ${this.grpcEndpoint}`);
         try {
             this.client = new Client(this.grpcEndpoint, undefined, {
-                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_time_ms': 10000,
                 'grpc.keepalive_timeout_ms': 5000,
                 'grpc.keepalive_permit_without_calls': true,
                 'grpc.http2.max_pings_without_data': 0,
-                'grpc.http2.min_time_between_pings_ms': 10000,
-                'grpc.http2.min_ping_interval_without_data_ms': 300000
+                'grpc.http2.min_time_between_pings_ms': 5000,
+                'grpc.http2.min_ping_interval_without_data_ms': 300000,
+                'grpc.compression': 'gzip' 
             });
             this.reconnectAttempts = 0;
             console.log(`[${new Date().toISOString()}] [INFO] gRPC client connected successfully`);
@@ -89,13 +91,21 @@ class SolanaGrpcService {
         const request = {
             accounts: {},
             slots: {},
-            transactions: { client: { vote: false, failed: false, accountInclude: Array.from(this.monitoredWallets), accountExclude: [], accountRequired: [] } },
+            transactions: { 
+                client: { 
+                    vote: false, 
+                    failed: false, 
+                    accountInclude: Array.from(this.monitoredWallets), 
+                    accountExclude: [], 
+                    accountRequired: [] 
+                } 
+            },
             transactionsStatus: {},
             entry: {},
             blocks: {},
             blocksMeta: {},
-            commitment: CommitmentLevel.CONFIRMED,
-            accountsDataSlice: []
+            commitment: CommitmentLevel.PROCESSED, 
+            accountsDataSlice: [{ offset: 0, length: 64 }] 
         };
 
         try {
@@ -103,6 +113,15 @@ class SolanaGrpcService {
             this.stream = await this.client.subscribe();
             this.stream.on('data', data => {
                 this.messageCount++;
+                const now = Date.now();
+                if (!this.tpsStartTime) this.tpsStartTime = now;
+                if (now - this.tpsStartTime >= 1000) {
+                    console.log(`[${new Date().toISOString()}] [INFO] TPS: ${this.messageCount / ((now - this.tpsStartTime) / 1000)}`);
+                    this.messageCount = 0;
+                    this.tpsStartTime = now;
+                }
+                const sizeInBytes = Buffer.byteLength(JSON.stringify(data));
+                console.log(`[${new Date().toISOString()}] [INFO] Received message size: ${sizeInBytes} bytes`);
                 this.handleGrpcMessage(data);
             });
             this.stream.on('error', error => {
@@ -144,10 +163,27 @@ class SolanaGrpcService {
             const signature = this.extractSignature(data.transaction);
             if (signature) {
                 console.log(`[${new Date().toISOString()}] [INFO] Transaction received: signature=${signature}`);
+                this.fetchTransactionDetails(signature);
             }
-            this.processTransaction(data.transaction);
         } catch (error) {
             console.error(`[${new Date().toISOString()}] [ERROR] Error handling gRPC message: ${error.message}`, error.stack);
+        }
+    }
+
+    async fetchTransactionDetails(signature) {
+        try {
+            const request = {
+                transactions: { signatures: [signature] },
+                commitment: CommitmentLevel.PROCESSED
+            };
+            const transactionData = await this.client.getTransaction(request);
+            if (transactionData && transactionData.transaction) {
+                this.processTransaction(transactionData.transaction);
+            } else {
+                console.warn(`[${new Date().toISOString()}] [WARN] No transaction data for signature: ${signature}`);
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Error fetching transaction details for ${signature}: ${error.message}`, error.stack);
         }
     }
 
@@ -265,43 +301,43 @@ class SolanaGrpcService {
         }
     }
 
-extractSignature(transactionData) {
-    try {
-        const sigObj = transactionData.signature || 
-                      (transactionData.signatures && transactionData.signatures[0]) ||
-                      transactionData.transaction?.signature || 
-                      (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
-                      transactionData.tx?.signature || 
-                      (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
-        
-        if (!sigObj) {
-            console.warn(`[${new Date().toISOString()}] [WARN] No signature found in transaction data`);
+    extractSignature(transactionData) {
+        try {
+            const sigObj = transactionData.signature || 
+                          (transactionData.signatures && transactionData.signatures[0]) ||
+                          transactionData.transaction?.signature || 
+                          (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
+                          transactionData.tx?.signature || 
+                          (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+            
+            if (!sigObj) {
+                console.warn(`[${new Date().toISOString()}] [WARN] No signature found in transaction data`);
+                return null;
+            }
+
+            let signature;
+            if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
+                signature = bs58.encode(Buffer.from(sigObj.data));
+            } else if (Buffer.isBuffer(sigObj)) {
+                signature = bs58.encode(sigObj);
+            } else if (typeof sigObj === 'string') {
+                signature = sigObj; 
+            } else {
+                console.warn(`[${new Date().toISOString()}] [WARN] Unexpected signature format: ${typeof sigObj}`);
+                signature = bs58.encode(Buffer.from(sigObj));
+            }
+
+            if (signature.length < 80 || signature.length > 88) {
+                console.warn(`[${new Date().toISOString()}] [WARN] Invalid signature length: ${signature.length}`);
+                return null;
+            }
+
+            return signature;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Error extracting signature: ${error.message}`, error.stack);
             return null;
         }
-
-        let signature;
-        if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
-            signature = bs58.encode(Buffer.from(sigObj.data));
-        } else if (Buffer.isBuffer(sigObj)) {
-            signature = bs58.encode(sigObj);
-        } else if (typeof sigObj === 'string') {
-            signature = sigObj; 
-        } else {
-            console.warn(`[${new Date().toISOString()}] [WARN] Unexpected signature format: ${typeof sigObj}`);
-            signature = bs58.encode(Buffer.from(sigObj));
-        }
-
-        if (signature.length < 80 || signature.length > 88) {
-            console.warn(`[${new Date().toISOString()}] [WARN] Invalid signature length: ${signature.length}`);
-            return null;
-        }
-
-        return signature;
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Error extracting signature: ${error.message}`, error.stack);
-        return null;
     }
-}
 
     convertGrpcToLegacyFormat(grpcData, accountKeys) {
         try {
