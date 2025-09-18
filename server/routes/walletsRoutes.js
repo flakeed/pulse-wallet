@@ -1,5 +1,4 @@
-// server/routes/walletsRoutes.js
-module.exports = (auth, db, solanaGrpcService) => { // Changed from WebSocket to gRPC
+module.exports = (auth, db, solanaGrpcService) => { 
   const express = require('express');
   const router = express.Router();
 
@@ -101,7 +100,7 @@ module.exports = (auth, db, solanaGrpcService) => { // Changed from WebSocket to
       
       if (addressesToRemove.length > 0) {
         try {
-          await solanaGrpcService.removeAllWallets(groupId); // Changed to use gRPC service
+          await solanaGrpcService.removeAllWallets(groupId);
           console.log(`[${new Date().toISOString()}] ✅ Successfully removed wallets from gRPC monitoring`);
         } catch (grpcError) {
           console.warn(`[${new Date().toISOString()}] ⚠️ gRPC removal warning: ${grpcError.message}`);
@@ -290,29 +289,36 @@ module.exports = (auth, db, solanaGrpcService) => { // Changed from WebSocket to
         throw new Error(`Database operation failed: ${dbError.message}`);
       }
 
-      if (results.successful > 0) {
-        console.log(`[${new Date().toISOString()}] 🔗 Starting global gRPC subscriptions...`);
-        
-        setImmediate(async () => {
-          try {
+if (results.successful > 0) {
+    console.log(`[${new Date().toISOString()}] 🔗 Starting global gRPC subscriptions...`);
+    
+    setImmediate(async () => {
+        try {
             const addressesToSubscribe = results.successfulWallets.map(w => w.address);
             
-            // Filter addresses relevant to current group
-            const relevantAddresses = results.successfulWallets
-              .filter(wallet => !solanaGrpcService.activeGroupId || wallet.groupId === solanaGrpcService.activeGroupId)
-              .map(w => w.address);
+            let relevantAddresses = [];
+            
+            if (solanaGrpcService.activeGroupId === null) {
+                relevantAddresses = addressesToSubscribe;
+                console.log(`[${new Date().toISOString()}] 📝 Adding all ${addressesToSubscribe.length} wallets (no active group)`);
+            } else {
+                relevantAddresses = results.successfulWallets
+                    .filter(wallet => wallet.groupId === solanaGrpcService.activeGroupId)
+                    .map(w => w.address);
+                console.log(`[${new Date().toISOString()}] 📝 Adding ${relevantAddresses.length}/${addressesToSubscribe.length} wallets for active group ${solanaGrpcService.activeGroupId}`);
+            }
 
             if (relevantAddresses.length > 0 && solanaGrpcService.getStatus().isConnected) {
-              await solanaGrpcService.subscribeToWalletsBatch(relevantAddresses, 200);
-              console.log(`[${new Date().toISOString()}] ✅ Global gRPC subscriptions completed: ${relevantAddresses.length} wallets`);
+                await solanaGrpcService.subscribeToWalletsBatch(relevantAddresses, 200);
+                console.log(`[${new Date().toISOString()}] ✅ Global gRPC subscriptions completed: ${relevantAddresses.length} wallets`);
             } else {
-              console.log(`[${new Date().toISOString()}] ⏭️ Skipping gRPC subscriptions: ${relevantAddresses.length} relevant, gRPC connected: ${solanaGrpcService.getStatus().isConnected}`);
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping gRPC subscriptions: ${relevantAddresses.length} relevant, gRPC connected: ${solanaGrpcService.getStatus().isConnected}`);
             }
-          } catch (grpcError) {
+        } catch (grpcError) {
             console.warn(`[${new Date().toISOString()}] ⚠️ Global gRPC subscription failed:`, grpcError.message);
-          }
-        });
-      }
+        }
+    });
+}
 
       const duration = Date.now() - startTime;
       const walletsPerSecond = Math.round((results.successful / duration) * 1000);
@@ -350,10 +356,10 @@ module.exports = (auth, db, solanaGrpcService) => { // Changed from WebSocket to
       const { action, groupId } = req.body;
 
       if (action === 'start') {
-        await solanaGrpcService.start(groupId); // Changed to use gRPC service
+        await solanaGrpcService.start(groupId); 
         res.json({ success: true, message: `Global gRPC monitoring started${groupId ? ` for group ${groupId}` : ''}` });
       } else if (action === 'stop') {
-        await solanaGrpcService.stop(); // Changed to use gRPC service
+        await solanaGrpcService.stop(); 
         res.json({ success: true, message: 'Global gRPC monitoring stopped' });
       } else {
         res.status(400).json({ error: 'Invalid action. Use "start" or "stop"' });

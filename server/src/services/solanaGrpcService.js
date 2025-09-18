@@ -167,69 +167,87 @@ class SolanaGrpcService {
             console.error(`[${new Date().toISOString()}] ❌ Error handling gRPC message:`, error.message);
         }
     }
-    async processTransaction(transactionData) {
-        try {
-            const transaction = transactionData.transaction;
-            const meta = transactionData.meta;
-            if (!transaction || !meta || meta.err) {
-                return;
-            }
-            const signature = transaction.signatures[0];
-            if (this.processedTransactions.has(signature)) {
-                return;
-            }
-            this.processedTransactions.add(signature);
-            let accountKeys = [];
-            if (transaction.message.accountKeys) {
-                accountKeys = transaction.message.accountKeys.map(key =>
-                    Buffer.from(key).toString('base64')
-                );
-            }
-            let involvedWallet = null;
-            for (const walletAddress of this.monitoredWallets) {
-                try {
-                    const { PublicKey } = require('@solana/web3.js');
-                    const pubkey = new PublicKey(walletAddress);
-                    const base64Key = Buffer.from(pubkey.toBytes()).toString('base64');
-                    if (accountKeys.includes(base64Key)) {
-                        involvedWallet = walletAddress;
-                        break;
-                    }
-                } catch (error) {
-                    console.warn(`[${new Date().toISOString()}] ⚠️ Invalid wallet address: ${walletAddress}`);
-                    continue;
-                }
-            }
-            if (!involvedWallet) {
-                return;
-            }
-            const wallet = await this.db.getWalletByAddress(involvedWallet);
-            if (!wallet) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${involvedWallet} not found in database`);
-                return;
-            }
-            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-                return;
-            }
-            let blockTime;
-            if (transactionData.slot && transactionData.blockTime) {
-                blockTime = Number(transactionData.blockTime);
-            } else {
-                blockTime = Math.floor(Date.now() / 1000);
-            }
-            console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}...`);
-            const convertedTransaction = this.convertGrpcToLegacyFormat(transactionData, accountKeys);
-            await this.monitoringService.processWebhookMessage({
-                signature: signature,
-                walletAddress: involvedWallet,
-                blockTime: blockTime,
-                groupId: wallet.group_id,
-                transactionData: convertedTransaction
-            });
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
+async processTransaction(transactionData) {
+    try {
+        const transaction = transactionData.transaction;
+        const meta = transactionData.meta;
+        
+        if (!transaction || !meta || meta.err) {
+            return;
         }
+        
+        const signature = transaction.signatures[0];
+        if (this.processedTransactions.has(signature)) {
+            return;
+        }
+        this.processedTransactions.add(signature);
+        
+        let accountKeys = [];
+        if (transaction.message.accountKeys) {
+            accountKeys = transaction.message.accountKeys.map(key =>
+                Buffer.from(key).toString('base64')
+            );
+        }
+        
+        let involvedWallet = null;
+        for (const walletAddress of this.monitoredWallets) {
+            try {
+                const { PublicKey } = require('@solana/web3.js');
+                const pubkey = new PublicKey(walletAddress);
+                const base64Key = Buffer.from(pubkey.toBytes()).toString('base64');
+                
+                if (accountKeys.includes(base64Key)) {
+                    involvedWallet = walletAddress;
+                    break;
+                }
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Invalid wallet address: ${walletAddress}`);
+                continue;
+            }
+        }
+        
+        if (!involvedWallet) {
+            return;
+        }
+        
+        const wallet = await this.db.getWalletByAddress(involvedWallet);
+        if (!wallet) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet ${involvedWallet} not found in database`);
+            return;
+        }
+        
+        console.log(`[${new Date().toISOString()}] 🔍 Transaction check: activeGroupId=${this.activeGroupId}, wallet.group_id=${wallet.group_id}`);
+        
+        if (this.activeGroupId) {
+            if (wallet.group_id !== this.activeGroupId) {
+                console.log(`[${new Date().toISOString()}] ⏭️ Skipping transaction ${signature.slice(0, 8)}... - wallet belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
+                return;
+            }
+        }
+        
+        let blockTime;
+        if (transactionData.slot && transactionData.blockTime) {
+            blockTime = Number(transactionData.blockTime);
+        } else {
+            blockTime = Math.floor(Date.now() / 1000);
+        }
+        
+        console.log(`[${new Date().toISOString()}] 🔍 Processing transaction ${signature.slice(0, 8)}... for wallet ${involvedWallet.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
+        
+        const convertedTransaction = this.convertGrpcToLegacyFormat(transactionData, accountKeys);
+        
+        await this.monitoringService.processWebhookMessage({
+            signature: signature,
+            walletAddress: involvedWallet,
+            blockTime: blockTime,
+            groupId: wallet.group_id,
+            transactionData: convertedTransaction
+        });
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
     }
+}
     convertGrpcToLegacyFormat(grpcData, accountKeys) {
         try {
             const transaction = grpcData.transaction;
@@ -282,18 +300,30 @@ class SolanaGrpcService {
             }
         }));
     }
-    async subscribeToWalletsBatch(walletAddresses, batchSize = 100) {
-        console.log(`[${new Date().toISOString()}] 📦 Adding ${walletAddresses.length} wallets to gRPC monitoring`);
-        walletAddresses.forEach(address => {
-            this.monitoredWallets.add(address);
-        });
-        console.log(`[${new Date().toISOString()}] ✅ gRPC now monitoring ${this.monitoredWallets.size} total wallets`);
-        return {
-            successful: walletAddresses.length,
-            failed: 0,
-            errors: []
-        };
+async subscribeToWalletsBatch(walletAddresses, batchSize = 100) {
+    console.log(`[${new Date().toISOString()}] 📦 Adding ${walletAddresses.length} wallets to gRPC monitoring`);
+    
+    walletAddresses.forEach(address => {
+        this.monitoredWallets.add(address);
+    });
+    
+    console.log(`[${new Date().toISOString()}] ✅ gRPC now monitoring ${this.monitoredWallets.size} total wallets`);
+    
+    if (this.isStarted && this.stream) {
+        console.log(`[${new Date().toISOString()}] 🔄 Updating gRPC subscription with new wallets`);
+        try {
+            console.log(`[${new Date().toISOString()}] ✅ Wallet monitoring updated - now tracking ${this.monitoredWallets.size} wallets`);
+        } catch (error) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Failed to update subscription:`, error.message);
+        }
     }
+    
+    return {
+        successful: walletAddresses.length,
+        failed: 0,
+        errors: []
+    };
+}
     async unsubscribeFromWalletsBatch(walletAddresses, batchSize = 100) {
         console.log(`[${new Date().toISOString()}] 📦 Removing ${walletAddresses.length} wallets from gRPC monitoring`);
         walletAddresses.forEach(address => {
@@ -354,21 +384,31 @@ class SolanaGrpcService {
             throw error;
         }
     }
-    async switchGroup(groupId) {
-        try {
-            const startTime = Date.now();
-            console.log(`[${new Date().toISOString()}] 🔄 Switching gRPC monitoring to group ${groupId || 'all'}`);
-            this.activeGroupId = groupId;
-            const wallets = await this.db.getActiveWallets(groupId);
-            this.monitoredWallets.clear();
-            wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-            const duration = Date.now() - startTime;
-            console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
-            throw error;
+
+async switchGroup(groupId) {
+    try {
+        const startTime = Date.now();
+        console.log(`[${new Date().toISOString()}] 🔄 Switching gRPC monitoring to group ${groupId || 'all'}`);
+        
+        this.activeGroupId = groupId;
+        
+        const wallets = await this.db.getActiveWallets(groupId);
+        this.monitoredWallets.clear();
+        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+        
+        if (this.isStarted) {
+            console.log(`[${new Date().toISOString()}] 🔄 Restarting gRPC subscription for group switch`);
+            await this.subscribeToTransactions();
         }
+        
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] ✅ gRPC group switch completed in ${duration}ms: now monitoring ${this.monitoredWallets.size} wallets`);
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error in gRPC switchGroup:`, error.message);
+        throw error;
     }
+}
+
     async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
             console.error(`[${new Date().toISOString()}] ❌ Max reconnect attempts reached for gRPC service`);
