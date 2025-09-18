@@ -34,38 +34,40 @@ class SolanaGrpcService {
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
         this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
         this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
         this.setupCacheCleanup();
         console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
-setupCacheCleanup() {
-    setInterval(() => {
-        const now = Date.now();
-        
-        if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
-            if (this.processedTransactions.size > 50000) {
-                const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
-                toDelete.forEach(sig => this.processedTransactions.delete(sig));
-                console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
+    setupCacheCleanup() {
+        setInterval(() => {
+            const now = Date.now();
+            
+            if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
+                if (this.processedTransactions.size > 50000) {
+                    const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
+                    toDelete.forEach(sig => this.processedTransactions.delete(sig));
+                    console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
+                }
+                this.lastProcessedCleanup = now;
             }
-            this.lastProcessedCleanup = now;
-        }
-        
-        if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
-            if (this.recentlyProcessed.size > 5000) {
-                const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
-                toDelete.forEach(key => this.recentlyProcessed.delete(key));
-                console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
+            
+            if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
+                if (this.recentlyProcessed.size > 5000) {
+                    const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
+                    toDelete.forEach(key => this.recentlyProcessed.delete(key));
+                    console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
+                }
+                this.lastRecentlyProcessedCleanup = now;
             }
-            this.lastRecentlyProcessedCleanup = now;
-        }
-        
-        if (now % (6 * 60 * 60 * 1000) < 300000) { 
-            console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
-            console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
-        }
-    }, 300000); 
-}
+            
+            if (now % (6 * 60 * 60 * 1000) < 300000) { 
+                console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
+                console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
+            }
+        }, 300000); 
+    }
 
     async fetchSolPrice() {
         const now = Date.now();
@@ -121,11 +123,11 @@ setupCacheCleanup() {
     }
 
     async start(groupId = null) {
-        if (this.isStarted && this.activeGroupId === groupId) {
-            console.log(`[${new Date().toISOString()}] [INFO] gRPC service already started for group ${groupId || 'all'}`);
+        if (this.isStarted) {
+            console.log(`[${new Date().toISOString()}] [INFO] gRPC service already started`);
             return;
         }
-        console.log(`[${new Date().toISOString()}] [INFO] Starting gRPC service for group ${groupId || 'all'}`);
+        console.log(`[${new Date().toISOString()}] [INFO] Starting gRPC service`);
         this.isStarted = true;
         this.activeGroupId = groupId;
         try {
@@ -164,11 +166,11 @@ setupCacheCleanup() {
     }
 
     async subscribeToTransactions() {
-        console.log(`[${new Date().toISOString()}] [INFO] Fetching active wallets for group ${this.activeGroupId || 'all'}`);
-        const wallets = await this.db.getActiveWallets(this.activeGroupId);
+        console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets globally`);
+        const wallets = await this.db.getActiveWallets(null);  
         this.monitoredWallets.clear();
         wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-        console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets`);
+        console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets globally`);
 
         if (this.monitoredWallets.size === 0) {
             console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
@@ -889,7 +891,7 @@ setupCacheCleanup() {
             }
 
             if (!groupId || groupId === this.activeGroupId) {
-                const remainingWallets = await this.db.getActiveWallets(this.activeGroupId);
+                const remainingWallets = await this.db.getActiveWallets(null);  
                 this.monitoredWallets.clear();
                 remainingWallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
                 console.log(`[${new Date().toISOString()}] [INFO] Reloaded monitoring: ${this.monitoredWallets.size} wallets remaining`);
@@ -917,20 +919,7 @@ setupCacheCleanup() {
         try {
             this.activeGroupId = groupId;
 
-            this.monitoredWallets.clear();
-
-            const wallets = await this.db.getActiveWallets(groupId);
-
-            const addresses = wallets.map(w => w.address);
-            if (addresses.length > 0) {
-                await this.subscribeToWalletsBatch(addresses);
-            }
-
-            console.log(`[${new Date().toISOString()}] [INFO] Switched to group ${groupId || 'all'}: ${this.monitoredWallets.size} wallets`);
-
-            if (this.isStarted) {
-                await this.subscribeToTransactions();
-            }
+            console.log(`[${new Date().toISOString()}] [INFO] Switched active group filter to ${groupId || 'all'}: still monitoring ${this.monitoredWallets.size} global wallets`);
 
             return {
                 success: true,
@@ -1075,6 +1064,7 @@ setupCacheCleanup() {
     }
 
     getPerformanceStats() {
+        const now = Date.now();
         return {
             monitoredWallets: this.monitoredWallets.size,
             messagesProcessed: this.messageCount,
@@ -1084,75 +1074,57 @@ setupCacheCleanup() {
             solPriceCache: {
                 price: this.solPriceCache.price,
                 lastUpdated: this.solPriceCache.lastUpdated,
-                ageMs: Date.now() - this.solPriceCache.lastUpdated
+                ageMs: now - this.solPriceCache.lastUpdated
+            },
+            cacheCleanup: {
+                lastProcessedCleanup: this.lastProcessedCleanup,
+                lastRecentlyProcessedCleanup: this.lastRecentlyProcessedCleanup,
+                timeSinceProcessedCleanup: now - this.lastProcessedCleanup,
+                timeSinceRecentlyProcessedCleanup: now - this.lastRecentlyProcessedCleanup,
+                nextProcessedCleanupIn: Math.max(0, this.PROCESSED_CLEANUP_INTERVAL - (now - this.lastProcessedCleanup)),
+                nextRecentlyProcessedCleanupIn: Math.max(0, this.RECENTLY_PROCESSED_CLEANUP_INTERVAL - (now - this.lastRecentlyProcessedCleanup))
             },
             reconnectAttempts: this.reconnectAttempts,
             isHealthy: this.isStarted && this.client !== null && this.stream !== null
         };
     }
 
-   forceCleanupCaches() {
-    const before = {
-        processedTransactions: this.processedTransactions.size,
-        recentlyProcessed: this.recentlyProcessed.size
-    };
-    
-    if (this.processedTransactions.size > 1000) {
-        const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
-        toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
-    } else {
-        this.processedTransactions.clear();
+    forceCleanupCaches() {
+        const before = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size
+        };
+        
+        if (this.processedTransactions.size > 1000) {
+            const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
+            toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
+        } else {
+            this.processedTransactions.clear();
+        }
+        
+        if (this.recentlyProcessed.size > 1000) {
+            const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
+            toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
+        } else {
+            this.recentlyProcessed.clear();
+        }
+        
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
+        
+        const after = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size
+        };
+        
+        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
+        return { before, after };
     }
-    
-    if (this.recentlyProcessed.size > 1000) {
-        const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
-        toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
-    } else {
-        this.recentlyProcessed.clear();
+
+    clearCaches() {
+        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
+        return this.forceCleanupCaches();
     }
-    
-    this.lastProcessedCleanup = Date.now();
-    this.lastRecentlyProcessedCleanup = Date.now();
-    
-    const after = {
-        processedTransactions: this.processedTransactions.size,
-        recentlyProcessed: this.recentlyProcessed.size
-    };
-    
-    console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
-    return { before, after };
-}
-
-clearCaches() {
-    console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
-    return this.forceCleanupCaches();
-}
-
-getPerformanceStats() {
-    const now = Date.now();
-    return {
-        monitoredWallets: this.monitoredWallets.size,
-        messagesProcessed: this.messageCount,
-        processedTransactionsCache: this.processedTransactions.size,
-        recentlyProcessedCache: this.recentlyProcessed.size,
-        currentBatchSize: this.transactionBatch.size,
-        solPriceCache: {
-            price: this.solPriceCache.price,
-            lastUpdated: this.solPriceCache.lastUpdated,
-            ageMs: now - this.solPriceCache.lastUpdated
-        },
-        cacheCleanup: {
-            lastProcessedCleanup: this.lastProcessedCleanup,
-            lastRecentlyProcessedCleanup: this.lastRecentlyProcessedCleanup,
-            timeSinceProcessedCleanup: now - this.lastProcessedCleanup,
-            timeSinceRecentlyProcessedCleanup: now - this.lastRecentlyProcessedCleanup,
-            nextProcessedCleanupIn: Math.max(0, this.PROCESSED_CLEANUP_INTERVAL - (now - this.lastProcessedCleanup)),
-            nextRecentlyProcessedCleanupIn: Math.max(0, this.RECENTLY_PROCESSED_CLEANUP_INTERVAL - (now - this.lastRecentlyProcessedCleanup))
-        },
-        reconnectAttempts: this.reconnectAttempts,
-        isHealthy: this.isStarted && this.client !== null && this.stream !== null
-    };
-}
 }
 
 module.exports = SolanaGrpcService;
