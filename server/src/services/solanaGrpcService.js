@@ -47,62 +47,72 @@ class SolanaGrpcService {
         }
     }
 
-    async connectStream() {
-        if (this.isConnecting || this.stream) return;
-        this.isConnecting = true;
+async connectStream() {
+    if (this.isConnecting || this.stream) return;
+    this.isConnecting = true;
 
-        console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcUrl}`);
-        
-        try {
-            if (this.stream) {
-                this.stream.cancel();
-                this.stream = null;
-            }
-
-            const request = {
-                transactions: {
-                    alltxs: {
-                        vote: false,
-                        failed: false,
-                        account_include: Array.from(this.monitoredWallets),
-                    }
-                }
-            };
-
-            this.stream = await this.client.subscribe();
-
-            this.stream.on('data', this.handleUpdate.bind(this));
-            this.stream.on('error', this.handleError.bind(this));
-            this.stream.on('end', this.handleEnd.bind(this));
-
-            console.log(`[${new Date().toISOString()}] 📤 Sending gRPC subscription request`);
-            await new Promise((resolve, reject) => {
-                this.stream.write(request, (err) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        resolve();
-                    }
-                });
-            });
-
-            console.log(`[${new Date().toISOString()}] ✅ Connected to Global Solana gRPC`);
-
-            this.pingInterval = setInterval(() => {
-                if (this.stream) {
-                    console.log(`[${new Date().toISOString()}] 📤 Sending ping to keep stream alive`);
-                    this.stream.write({ ping: { id: 1 } });
-                }
-            }, 30000);
-
-            this.reconnectAttempts = 0;
-            this.isConnecting = false;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message);
-            this.isConnecting = false;
-            throw error;
+    console.log(`[${new Date().toISOString()}] 🔌 Connecting to gRPC: ${this.grpcUrl}`);
+    
+    try {
+        if (this.stream) {
+            this.stream.cancel();
+            this.stream = null;
         }
+
+        const validWallets = Array.from(this.monitoredWallets).filter(
+            wallet => typeof wallet === 'string' && wallet.length > 0
+        );
+        if (validWallets.length !== this.monitoredWallets.size) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Removed ${this.monitoredWallets.size - validWallets.length} invalid wallets from monitoredWallets`);
+            this.monitoredWallets = new Set(validWallets);
+        }
+
+        const request = {
+            transactions: {
+                alltxs: {
+                    vote: false,
+                    failed: false,
+                    account_include: validWallets,
+                }
+            }
+        };
+
+        console.log(`[${new Date().toISOString()}] 📤 Subscription request:`, JSON.stringify(request, null, 2));
+
+        this.stream = await this.client.subscribe();
+
+        this.stream.on('data', this.handleUpdate.bind(this));
+        this.stream.on('error', this.handleError.bind(this));
+        this.stream.on('end', this.handleEnd.bind(this));
+
+        console.log(`[${new Date().toISOString()}] 📤 Sending gRPC subscription request`);
+        await new Promise((resolve, reject) => {
+            this.stream.write(request, (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve();
+                }
+            });
+        });
+
+        console.log(`[${new Date().toISOString()}] ✅ Connected to Global Solana gRPC`);
+
+        this.pingInterval = setInterval(() => {
+            if (this.stream) {
+                console.log(`[${new Date().toISOString()}] 📤 Sending ping to keep stream alive`);
+                this.stream.write({ ping: { id: 1 } });
+            }
+        }, 30000);
+
+        this.reconnectAttempts = 0;
+        this.isConnecting = false;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Failed to create gRPC connection:`, error.message);
+        this.isConnecting = false;
+        throw error;
     }
+}
 
     async handleUpdate(update) {
         this.messageCount++;
@@ -211,59 +221,86 @@ class SolanaGrpcService {
         if (this.isStarted) this.handleReconnect();
     }
 
-async subscribeToWalletsBatch(walletAddresses) {
-    if (!walletAddresses || walletAddresses.length === 0) return;
+async subscribeToWallets() {
+    this.monitoredWallets.clear();
     
-    const startTime = Date.now();
+    const wallets = await this.db.getActiveWallets(this.activeGroupId);
+    
+    console.log(`[${new Date().toISOString()}] 📊 Found ${wallets.length} wallets to monitor${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
+    
+    if (wallets.length === 0) {
+        console.log(`[${new Date().toISOString()}] ℹ️ No wallets found for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ''}`);
+        return { successful: 0, failed: 0, errors: [] };
+    }
+    
     const results = {
         successful: 0,
         failed: 0,
         errors: []
     };
-
-    walletAddresses.forEach(walletAddress => {
-        if (!walletAddress || typeof walletAddress !== 'string') {
-            results.errors.push({ address: walletAddress, error: 'Invalid or undefined wallet address' });
+    
+    const walletAddresses = wallets
+        .map(w => w.address)
+        .filter(address => {
+            if (!address || typeof address !== 'string') {
+                results.errors.push({ address, error: 'Invalid or undefined wallet address' });
+                results.failed++;
+                return false;
+            }
+            try {
+                new PublicKey(address); 
+                return true;
+            } catch (error) {
+                results.errors.push({ address, error: `Invalid Solana public key: ${error.message}` });
+                results.failed++;
+                return false;
+            }
+        });
+    
+    walletAddresses.forEach(address => {
+        if (this.monitoredWallets.size >= this.maxSubscriptions) {
+            results.errors.push({ address, error: `Maximum global subscription limit of ${this.maxSubscriptions} reached` });
             results.failed++;
             return;
         }
-
-        try {
-            new PublicKey(walletAddress); 
-            if (this.monitoredWallets.has(walletAddress)) {
-                results.successful++;
-                return;
-            }
-
-            if (this.monitoredWallets.size >= this.maxSubscriptions) {
-                results.errors.push({ address: walletAddress, error: `Maximum global subscription limit of ${this.maxSubscriptions} reached` });
-                results.failed++;
-                return;
-            }
-
-            this.monitoredWallets.add(walletAddress);
-            results.successful++;
-        } catch (error) {
-            results.errors.push({ address: walletAddress, error: `Invalid Solana public key: ${error.message}` });
-            results.failed++;
-        }
+        this.monitoredWallets.add(address);
+        results.successful++;
     });
-
-    if (results.successful > 0) {
+    
+    console.log(`[${new Date().toISOString()}] 🔍 Wallet addresses:`, walletAddresses);
+    
+    if (walletAddresses.length > this.maxSubscriptions) {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Wallet count (${walletAddresses.length}) exceeds maximum (${this.maxSubscriptions}), truncating`);
+        walletAddresses.length = this.maxSubscriptions;
+        this.monitoredWallets = new Set(walletAddresses);
+        results.successful = walletAddresses.length;
+        results.failed += walletAddresses.length - this.maxSubscriptions;
+    }
+    
+    if (walletAddresses.length > 0) {
+        console.log(`[${new Date().toISOString()}] 🔍 Sample wallets to subscribe (group: ${this.activeGroupId || 'all'}):`);
+        walletAddresses.slice(0, 5).forEach(address => {
+            const wallet = wallets.find(w => w.address === address);
+            console.log(`  - ${address.slice(0, 8)}... (group: ${wallet?.group_id || 'none'})`);
+        });
+    }
+    
+    if (this.monitoredWallets.size > 0) {
         await this.restartStream();
     } else {
         console.log(`[${new Date().toISOString()}] ⚠️ No valid wallets to subscribe, skipping stream restart`);
     }
-
-    const duration = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] ✅ Global batch subscription completed in ${duration}ms:`);
-    console.log(`  - Successful: ${results.successful}`);
-    console.log(`  - Failed: ${results.failed}`);
-    console.log(`  - Total active subscriptions: ${this.monitoredWallets.size}`);
+    
+    console.log(`[${new Date().toISOString()}] 🎉 Subscription summary for group ${this.activeGroupId || 'all'}:`);
+    console.log(`  - Total wallets: ${wallets.length}`);
+    console.log(`  - Successful subscriptions: ${results.successful}`);
+    console.log(`  - Failed subscriptions: ${results.failed}`);
+    console.log(`  - Active subscriptions: ${this.monitoredWallets.size}`);
+    console.log(`  - Active group ID: ${this.activeGroupId || 'none'}`);
     if (results.errors.length > 0) {
         console.log(`  - Errors:`, results.errors);
     }
-
+    
     return results;
 }
 
@@ -315,42 +352,79 @@ async restartStream() {
         return results;
     }
 
-    async subscribeToWallets() {
-        this.monitoredWallets.clear();
-        
-        const wallets = await this.db.getActiveWallets(this.activeGroupId);
-        
-        console.log(`[${new Date().toISOString()}] 📊 Found ${wallets.length} wallets to monitor${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
-        
-        if (wallets.length === 0) {
-            console.log(`[${new Date().toISOString()}] ℹ️ No wallets found for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ''}`);
-            return { successful: 0, failed: 0, errors: [] };
-        }
-        
-        if (wallets.length > this.maxSubscriptions) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Wallet count (${wallets.length}) exceeds maximum (${this.maxSubscriptions}), truncating`);
-            wallets.length = this.maxSubscriptions;
-        }
-        
-        if (wallets.length > 0) {
-            console.log(`[${new Date().toISOString()}] 🔍 Sample wallets to subscribe (group: ${this.activeGroupId || 'all'}):`);
-            wallets.slice(0, 5).forEach(wallet => {
-                console.log(`  - ${wallet.address.slice(0, 8)}... (group: ${wallet.group_id || 'none'})`);
-            });
-        }
+async subscribeToWallets() {
+    this.monitoredWallets.clear();
     
-        const walletAddresses = wallets.map(w => w.address);
-        const results = await this.subscribeToWalletsBatch(walletAddresses);
+    const wallets = await this.db.getActiveWallets(this.activeGroupId);
     
-        console.log(`[${new Date().toISOString()}] 🎉 Subscription summary for group ${this.activeGroupId || 'all'}:`);
-        console.log(`  - Total wallets: ${wallets.length}`);
-        console.log(`  - Successful subscriptions: ${results.successful}`);
-        console.log(`  - Failed subscriptions: ${results.failed}`);
-        console.log(`  - Active subscriptions: ${this.monitoredWallets.size}`);
-        console.log(`  - Active group ID: ${this.activeGroupId || 'none'}`);
+    console.log(`[${new Date().toISOString()}] 📊 Found ${wallets.length} wallets to monitor${this.activeGroupId ? ` in group ${this.activeGroupId}` : ' (all groups)'}`);
     
-        return results;
+    if (wallets.length === 0) {
+        console.log(`[${new Date().toISOString()}] ℹ️ No wallets found for monitoring${this.activeGroupId ? ` in group ${this.activeGroupId}` : ''}`);
+        return { successful: 0, failed: 0, errors: [] };
     }
+    
+    const results = {
+        successful: 0,
+        failed: 0,
+        errors: []
+    };
+    
+    const walletAddresses = wallets
+        .map(w => w.address)
+        .filter(address => {
+            if (!address || typeof address !== 'string') {
+                results.errors.push({ address, error: 'Invalid or undefined wallet address' });
+                results.failed++;
+                return false;
+            }
+            try {
+                new PublicKey(address); 
+                return true;
+            } catch (error) {
+                results.errors.push({ address, error: `Invalid Solana public key: ${error.message}` });
+                results.failed++;
+                return false;
+            }
+        });
+    
+    walletAddresses.forEach(address => this.monitoredWallets.add(address));
+    results.successful = walletAddresses.length;
+    
+    console.log(`[${new Date().toISOString()}] 🔍 Wallet addresses:`, walletAddresses);
+    
+    if (walletAddresses.length > this.maxSubscriptions) {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Wallet count (${walletAddresses.length}) exceeds maximum (${this.maxSubscriptions}), truncating`);
+        walletAddresses.length = this.maxSubscriptions;
+        this.monitoredWallets = new Set(walletAddresses);
+    }
+    
+    if (walletAddresses.length > 0) {
+        console.log(`[${new Date().toISOString()}] 🔍 Sample wallets to subscribe (group: ${this.activeGroupId || 'all'}):`);
+        walletAddresses.slice(0, 5).forEach(address => {
+            const wallet = wallets.find(w => w.address === address);
+            console.log(`  - ${address.slice(0, 8)}... (group: ${wallet?.group_id || 'none'})`);
+        });
+    }
+    
+    if (walletAddresses.length > 0) {
+        await this.restartStream();
+    } else {
+        console.log(`[${new Date().toISOString()}] ⚠️ No valid wallets to subscribe, skipping stream restart`);
+    }
+    
+    console.log(`[${new Date().toISOString()}] 🎉 Subscription summary for group ${this.activeGroupId || 'all'}:`);
+    console.log(`  - Total wallets: ${wallets.length}`);
+    console.log(`  - Successful subscriptions: ${results.successful}`);
+    console.log(`  - Failed subscriptions: ${results.failed}`);
+    console.log(`  - Active subscriptions: ${this.monitoredWallets.size}`);
+    console.log(`  - Active group ID: ${this.activeGroupId || 'none'}`);
+    if (results.errors.length > 0) {
+        console.log(`  - Errors:`, results.errors);
+    }
+    
+    return results;
+}
 
     async unsubscribeFromWallet(walletAddress) {
         if (!this.monitoredWallets.has(walletAddress)) return;
@@ -466,25 +540,30 @@ async restartStream() {
         }
     }
 
-    async handleReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] ❌ Max reconnect attempts reached for global service`);
-            this.isStarted = false;
-            return;
-        }
-
-        this.reconnectAttempts++;
-        const backoffDelay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1);
-        console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${backoffDelay}ms`);
-
-        await new Promise(resolve => setTimeout(resolve, backoffDelay));
-        try {
-            await this.connectStream();
-            await this.subscribeToWallets();
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message);
-        }
+async handleReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        console.error(`[${new Date().toISOString()}] ❌ Max reconnect attempts reached for global service`);
+        this.isStarted = false;
+        return;
     }
+
+    if (this.isConnecting) {
+        console.log(`[${new Date().toISOString()}] ℹ️ Reconnect already in progress, skipping`);
+        return;
+    }
+
+    this.reconnectAttempts++;
+    const backoffDelay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1);
+    console.log(`[${new Date().toISOString()}] 🔄 Reconnecting global service (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${backoffDelay}ms`);
+
+    await new Promise(resolve => setTimeout(resolve, backoffDelay));
+    try {
+        await this.connectStream();
+        await this.subscribeToWallets();
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Global reconnect failed:`, error.message);
+    }
+}
 
     getStatus() {
         return {
