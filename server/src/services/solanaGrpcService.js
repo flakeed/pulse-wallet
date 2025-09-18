@@ -1,4 +1,4 @@
-const Client = require('@triton-one/yellowstone-grpc');
+const YellowstoneGrpcClient = require('@triton-one/yellowstone-grpc').default;
 const { Connection, PublicKey, Message, VersionedMessage, AddressLookupTableAccount } = require('@solana/web3.js');
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
@@ -13,7 +13,7 @@ class SolanaGrpcService {
             commitment: 'confirmed',
             httpHeaders: { 'Connection': 'keep-alive' }
         });
-        this.client = new Client(this.grpcUrl, this.token);
+        this.client = new YellowstoneGrpcClient(this.grpcUrl, this.token);
         this.monitoringService = new WalletMonitoringService();
         this.db = new Database();
         this.stream = null;
