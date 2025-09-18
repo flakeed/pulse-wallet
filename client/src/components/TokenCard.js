@@ -122,10 +122,10 @@ function TokenCard({ token, onOpenChart }) {
 
   const netColor = groupPnL ? getPnLColor(groupPnL.totalPnLSOL) : 'text-gray-400';
   
-  const isNewToken = token.isNew || false;
-  const tokenAge = token.age || data?.age || null;
+  const isNewToken = data?.age?.isNew || false;
+  const tokenAge = data?.age || null;
   const formattedAge = tokenAge ? formatAge(tokenAge) : 'Unknown';
-  const deploymentTime = token.age?.createdAt || data?.age?.createdAt;
+  const deploymentTime = tokenAge?.createdAt;
 
   const displayPnL = groupPnL?.totalPnLSOL || 0;
 
@@ -133,9 +133,7 @@ function TokenCard({ token, onOpenChart }) {
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
 
   return (
-    <div className={`bg-gray-900 border border-gray-700 hover:border-gray-600 transition-colors ${
-      isNewToken ? 'ring-2 ring-red-500/30' : ''
-    }`}>
+    <div className="bg-gray-900 border border-gray-700 hover:border-gray-600 transition-colors">
       <div className="flex items-center justify-between p-3 border-b border-gray-800">
         <div className="flex items-center space-x-3 min-w-0 flex-1">
           <div className="min-w-0 flex-1">
@@ -166,12 +164,7 @@ function TokenCard({ token, onOpenChart }) {
                     d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
               </button>
-              <span 
-                className={`text-xs font-medium ${
-                  isNewToken ? 'text-red-400' : 'text-gray-500'
-                }`} 
-                title={token.age?.createdAt ? `Created: ${new Date(token.age.createdAt).toLocaleString()}` : 'Unknown'}
-              >
+              <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
                 {formattedAge}
               </span>
             </div>
@@ -239,9 +232,9 @@ function TokenCard({ token, onOpenChart }) {
                 {isNewToken && (
                   <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
                 )}
-                {token.age?.ageInMinutes && (
-                  <div className="text-gray-500 text-xs mt-1">
-                    Age: {(token.age.ageInMinutes).toFixed(1)} minutes
+                {deploymentTime && (
+                  <div className="text-gray-500 text-xs">
+                    Created: {new Date(deploymentTime).toLocaleDateString()}
                   </div>
                 )}
               </div>
