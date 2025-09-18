@@ -50,7 +50,8 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
               totalReceivedSOL: 0,
               netSOL: 0,
               latestActivity: null,
-              oldestToken: null, 
+              deploymentTime: null,
+              ageInHours: null,
             },
           });
         }
@@ -65,8 +66,11 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
         }
 
         if (token.deployment_time) {
-          if (!tokenData.summary.oldestToken || new Date(token.deployment_time) < new Date(tokenData.summary.oldestToken)) {
-            tokenData.summary.oldestToken = token.deployment_time;
+          if (!tokenData.summary.deploymentTime || new Date(token.deployment_time) < new Date(tokenData.summary.deploymentTime)) {
+            tokenData.summary.deploymentTime = token.deployment_time;
+            const deployTime = new Date(token.deployment_time);
+            const currentTime = new Date();
+            tokenData.summary.ageInHours = (currentTime - deployTime) / (1000 * 60 * 60);
           }
         }
 
@@ -134,13 +138,14 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
       
       case 'newest':
         return sortedTokens.sort((a, b) => {
-          const timeA = a.summary.oldestToken ? new Date(a.summary.oldestToken) : new Date(0);
-          const timeB = b.summary.oldestToken ? new Date(b.summary.oldestToken) : new Date(0);
+          const deployTimeA = a.summary.deploymentTime ? new Date(a.summary.deploymentTime) : new Date(0);
+          const deployTimeB = b.summary.deploymentTime ? new Date(b.summary.deploymentTime) : new Date(0);
           
-          if (a.summary.oldestToken && !b.summary.oldestToken) return -1;
-          if (!a.summary.oldestToken && b.summary.oldestToken) return 1;
+          if (!a.summary.deploymentTime && b.summary.deploymentTime) return 1;
+          if (a.summary.deploymentTime && !b.summary.deploymentTime) return -1;
+          if (!a.summary.deploymentTime && !b.summary.deploymentTime) return 0;
           
-          return timeB - timeA;
+          return deployTimeB - deployTimeA;
         });
       
       case 'most_wallets':
