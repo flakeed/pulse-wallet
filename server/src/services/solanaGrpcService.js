@@ -1,4 +1,5 @@
-const { Client, CommitmentLevel } = require('@triton-one/yellowstone-grpc');
+const { 
+  default: Client, CommitmentLevel } = require('@triton-one/yellowstone-grpc');
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 
