@@ -32,31 +32,44 @@ class SolanaGrpcService {
         this.batchTimeout = 200;
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
+        this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
+        this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
         this.setupCacheCleanup();
         console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
-    setupCacheCleanup() {
-        setInterval(() => {
+setupCacheCleanup() {
+    setInterval(() => {
+        const now = Date.now();
+        
+        if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
             if (this.processedTransactions.size > 50000) {
                 const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
                 toDelete.forEach(sig => this.processedTransactions.delete(sig));
-                console.log(`[${new Date().toISOString()}] 🧹 Cleaned ${toDelete.length} processed transactions`);
+                console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions (total: ${this.processedTransactions.size})`);
             }
-        }, 300000);
+            this.lastProcessedCleanup = now;
+        }
         
-        setInterval(() => {
+        if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
             if (this.recentlyProcessed.size > 5000) {
                 const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
                 toDelete.forEach(key => this.recentlyProcessed.delete(key));
-                console.log(`[${new Date().toISOString()}] 🧹 Cleaned ${toDelete.length} recently processed entries`);
+                console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recently processed entries (total: ${this.recentlyProcessed.size})`);
             }
-        }, 60000);
-    }
+            this.lastRecentlyProcessedCleanup = now;
+        }
+        
+        if (now % (6 * 60 * 60 * 1000) < 300000) { 
+            console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
+            console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
+        }
+    }, 300000); 
+}
 
     async fetchSolPrice() {
         const now = Date.now();
-        
+
         if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
             return this.solPriceCache.price;
         }
@@ -96,14 +109,14 @@ class SolanaGrpcService {
                         price: newPrice,
                         timestamp: now
                     }));
-                    
+
                     return newPrice;
                 }
             }
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
         }
-        
+
         return this.solPriceCache.price;
     }
 
@@ -170,14 +183,14 @@ class SolanaGrpcService {
         const request = {
             accounts: {},
             slots: {},
-            transactions: { 
-                client: { 
-                    vote: false, 
-                    failed: false, 
-                    accountInclude: Array.from(this.monitoredWallets), 
-                    accountExclude: [], 
-                    accountRequired: [] 
-                } 
+            transactions: {
+                client: {
+                    vote: false,
+                    failed: false,
+                    accountInclude: Array.from(this.monitoredWallets),
+                    accountExclude: [],
+                    accountRequired: []
+                }
             },
             transactionsStatus: {},
             entry: {},
@@ -262,14 +275,14 @@ class SolanaGrpcService {
 
         const results = await Promise.allSettled(promises);
         const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-        
+
         console.log(`[${new Date().toISOString()}] [INFO] Batch processed: ${successful}/${batch.size} successful`);
     }
 
     async processTransaction(transactionData) {
         try {
             let transaction = null, meta = null;
-            
+
             if (transactionData.transaction?.transaction) {
                 transaction = transactionData.transaction.transaction;
                 meta = transactionData.transaction.meta;
@@ -292,7 +305,7 @@ class SolanaGrpcService {
             if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
                 return null;
             }
-            
+
             this.processedTransactions.add(signature);
             this.recentlyProcessed.add(processedKey);
 
@@ -314,7 +327,7 @@ class SolanaGrpcService {
 
             const walletCacheKey = `wallet:${involvedWallet}`;
             let wallet = null;
-            
+
             try {
                 const cachedWallet = await redis.get(walletCacheKey);
                 if (cachedWallet) {
@@ -354,11 +367,11 @@ class SolanaGrpcService {
 
     convertAccountKeysToStrings(accountKeys) {
         const stringAccountKeys = [];
-        
+
         for (const key of accountKeys) {
             try {
                 let convertedKey;
-                
+
                 if (key.type === 'Buffer' && Array.isArray(key.data)) {
                     convertedKey = new PublicKey(Buffer.from(key.data)).toString();
                 } else if (Buffer.isBuffer(key)) {
@@ -366,13 +379,13 @@ class SolanaGrpcService {
                 } else if (typeof key === 'string') {
                     convertedKey = key;
                 } else if (key && typeof key === 'object') {
-                    const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) : 
-                                       key.pubkey || key.key || key.address;
+                    const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) :
+                        key.pubkey || key.key || key.address;
                     convertedKey = pubkeyBuffer ? new PublicKey(pubkeyBuffer).toString() : key.toString();
                 } else {
                     convertedKey = new PublicKey(Buffer.from(key)).toString();
                 }
-                
+
                 if (convertedKey.length === 44) {
                     stringAccountKeys.push(convertedKey);
                 }
@@ -380,7 +393,7 @@ class SolanaGrpcService {
                 console.error(`[${new Date().toISOString()}] [ERROR] Error converting account key: ${error.message}`);
             }
         }
-        
+
         return stringAccountKeys;
     }
 
@@ -472,7 +485,7 @@ class SolanaGrpcService {
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     RETURNING id, signature, transaction_type
                 `;
-                
+
                 const transactionResult = await client.query(transactionQuery, [
                     wallet.id,
                     signature,
@@ -520,7 +533,7 @@ class SolanaGrpcService {
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING id
             `;
-            
+
             const tokenResult = await client.query(tokenUpsertQuery, [
                 tokenChange.mint,
                 tokenChange.symbol,
@@ -534,14 +547,14 @@ class SolanaGrpcService {
                 INSERT INTO token_operations (transaction_id, token_id, amount, operation_type) 
                 VALUES ($1, $2, $3, $4)
             `;
-            
+
             await client.query(operationQuery, [
-                transactionId, 
-                tokenId, 
-                tokenChange.amount, 
+                transactionId,
+                tokenId,
+                tokenChange.amount,
                 transactionType
             ]);
-            
+
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error saving token operation: ${error.message}`);
             throw error;
@@ -550,21 +563,21 @@ class SolanaGrpcService {
 
     async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
         const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-        
+
         let transactionType = null;
         let totalSolAmount = 0;
 
-        const usdcPreBalance = (meta.preTokenBalances || []).find(b => 
+        const usdcPreBalance = (meta.preTokenBalances || []).find(b =>
             b.mint === USDC_MINT && b.owner === walletAddress
         );
-        const usdcPostBalance = (meta.postTokenBalances || []).find(b => 
+        const usdcPostBalance = (meta.postTokenBalances || []).find(b =>
             b.mint === USDC_MINT && b.owner === walletAddress
         );
-        
+
         let usdcChange = 0;
         if (usdcPreBalance && usdcPostBalance) {
-            usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) - 
-                         Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
+            usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) -
+                Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
         } else if (usdcPostBalance) {
             usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
         } else if (usdcPreBalance) {
@@ -588,8 +601,8 @@ class SolanaGrpcService {
         }
 
         const tokenChanges = await this.analyzeTokenChangesFromGrpc(
-            meta, 
-            transactionType, 
+            meta,
+            transactionType,
             walletAddress
         );
 
@@ -602,7 +615,7 @@ class SolanaGrpcService {
         const tokenChanges = [];
 
         const allBalanceChanges = new Map();
-        
+
         for (const pre of meta.preTokenBalances || []) {
             const key = `${pre.mint}-${pre.accountIndex}`;
             allBalanceChanges.set(key, {
@@ -722,7 +735,7 @@ class SolanaGrpcService {
         if (uncachedMints.length > 0) {
             try {
                 const newTokenInfos = await batchFetchTokenMetadata(uncachedMints, null);
-                
+
                 const cachePipeline = redis.pipeline();
                 for (const [mint, tokenInfo] of newTokenInfos) {
                     if (tokenInfo) {
@@ -731,7 +744,7 @@ class SolanaGrpcService {
                     }
                 }
                 await cachePipeline.exec();
-                
+
             } catch (error) {
                 console.error(`[${new Date().toISOString()}] ❌ Error batch fetching token metadata:`, error.message);
                 for (const mint of uncachedMints) {
@@ -751,13 +764,13 @@ class SolanaGrpcService {
 
     extractSignature(transactionData) {
         try {
-            const sigObj = transactionData.signature || 
-                          (transactionData.signatures && transactionData.signatures[0]) ||
-                          transactionData.transaction?.signature || 
-                          (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
-                          transactionData.tx?.signature || 
-                          (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
-            
+            const sigObj = transactionData.signature ||
+                (transactionData.signatures && transactionData.signatures[0]) ||
+                transactionData.transaction?.signature ||
+                (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
+                transactionData.tx?.signature ||
+                (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+
             if (!sigObj) {
                 return null;
             }
@@ -768,7 +781,7 @@ class SolanaGrpcService {
             } else if (Buffer.isBuffer(sigObj)) {
                 signature = bs58.encode(sigObj);
             } else if (typeof sigObj === 'string') {
-                signature = sigObj; 
+                signature = sigObj;
             } else {
                 signature = bs58.encode(Buffer.from(sigObj));
             }
@@ -792,7 +805,7 @@ class SolanaGrpcService {
 
         for (let i = 0; i < walletAddresses.length; i += batchSize) {
             const batch = walletAddresses.slice(i, i + batchSize);
-            
+
             try {
                 batch.forEach(address => {
                     if (!this.monitoredWallets.has(address)) {
@@ -800,11 +813,11 @@ class SolanaGrpcService {
                         successful++;
                     }
                 });
-                
+
                 if (batch.length >= batchSize && i + batchSize < walletAddresses.length) {
                     await new Promise(resolve => setTimeout(resolve, 10));
                 }
-                
+
             } catch (error) {
                 failed += batch.length;
                 errors.push({
@@ -814,10 +827,10 @@ class SolanaGrpcService {
                 });
             }
         }
-        
+
         const duration = Date.now() - startTime;
         console.log(`[${new Date().toISOString()}] [INFO] Batch subscription completed in ${duration}ms: +${successful} wallets, total: ${this.monitoredWallets.size}`);
-        
+
         return { successful, failed, errors, totalMonitored: this.monitoredWallets.size };
     }
 
@@ -827,7 +840,7 @@ class SolanaGrpcService {
 
         for (let i = 0; i < walletAddresses.length; i += batchSize) {
             const batch = walletAddresses.slice(i, i + batchSize);
-            
+
             batch.forEach(address => {
                 if (this.monitoredWallets.has(address)) {
                     this.monitoredWallets.delete(address);
@@ -835,10 +848,10 @@ class SolanaGrpcService {
                 }
             });
         }
-        
+
         const duration = Date.now() - startTime;
         console.log(`[${new Date().toISOString()}] [INFO] Batch unsubscription completed in ${duration}ms: -${successful} wallets, total: ${this.monitoredWallets.size}`);
-        
+
         return { successful, failed: 0, errors: [], totalMonitored: this.monitoredWallets.size };
     }
 
@@ -860,13 +873,13 @@ class SolanaGrpcService {
 
     async removeAllWallets(groupId = null) {
         console.log(`[${new Date().toISOString()}] [INFO] Removing all wallets for group ${groupId || 'all'}`);
-        
+
         try {
             const walletsToRemove = await this.db.getActiveWallets(groupId);
             const addressesToRemove = walletsToRemove.map(w => w.address);
-            
+
             addressesToRemove.forEach(address => this.monitoredWallets.delete(address));
-            
+
             if (addressesToRemove.length > 0) {
                 const pipeline = redis.pipeline();
                 addressesToRemove.forEach(address => {
@@ -874,24 +887,24 @@ class SolanaGrpcService {
                 });
                 await pipeline.exec();
             }
-            
+
             if (!groupId || groupId === this.activeGroupId) {
                 const remainingWallets = await this.db.getActiveWallets(this.activeGroupId);
                 this.monitoredWallets.clear();
                 remainingWallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
                 console.log(`[${new Date().toISOString()}] [INFO] Reloaded monitoring: ${this.monitoredWallets.size} wallets remaining`);
             }
-            
+
             return {
                 success: true,
                 message: `Removed ${addressesToRemove.length} wallets`,
-                details: { 
-                    walletsRemoved: addressesToRemove.length, 
-                    remainingWallets: this.monitoredWallets.size, 
-                    groupId 
+                details: {
+                    walletsRemoved: addressesToRemove.length,
+                    remainingWallets: this.monitoredWallets.size,
+                    groupId
                 }
             };
-            
+
         } catch (error) {
             console.error(`[${new Date().toISOString()}] [ERROR] Error removing wallets: ${error.message}`);
             throw error;
@@ -900,31 +913,31 @@ class SolanaGrpcService {
 
     async switchGroup(groupId) {
         console.log(`[${new Date().toISOString()}] [INFO] Switching to group ${groupId || 'all'}`);
-        
+
         try {
             this.activeGroupId = groupId;
-            
+
             this.monitoredWallets.clear();
-            
+
             const wallets = await this.db.getActiveWallets(groupId);
-            
+
             const addresses = wallets.map(w => w.address);
             if (addresses.length > 0) {
                 await this.subscribeToWalletsBatch(addresses);
             }
-            
+
             console.log(`[${new Date().toISOString()}] [INFO] Switched to group ${groupId || 'all'}: ${this.monitoredWallets.size} wallets`);
-            
+
             if (this.isStarted) {
                 await this.subscribeToTransactions();
             }
-            
+
             return {
                 success: true,
                 activeGroupId: this.activeGroupId,
                 monitoredWallets: this.monitoredWallets.size
             };
-            
+
         } catch (error) {
             console.error(`[${new Date().toISOString()}] [ERROR] Error switching group: ${error.message}`);
             throw error;
@@ -937,10 +950,10 @@ class SolanaGrpcService {
             this.isStarted = false;
             return;
         }
-        
+
         this.reconnectAttempts++;
         console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        
+
         if (this.stream) {
             try {
                 this.stream.end();
@@ -948,7 +961,7 @@ class SolanaGrpcService {
                 console.warn(`[${new Date().toISOString()}] [WARN] Error ending stream:`, error.message);
             }
         }
-        
+
         if (this.client) {
             try {
                 if (typeof this.client.close === 'function') this.client.close();
@@ -959,14 +972,14 @@ class SolanaGrpcService {
             }
             this.client = null;
         }
-        
+
         if (this.batchTimer) {
             clearTimeout(this.batchTimer);
             this.batchTimer = null;
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
-        
+
         try {
             this.isConnecting = false;
             await this.connect();
@@ -1006,19 +1019,19 @@ class SolanaGrpcService {
 
     async stop() {
         console.log(`[${new Date().toISOString()}] [INFO] Stopping optimized gRPC service`);
-        
+
         this.isStarted = false;
-        
+
         if (this.batchTimer) {
             clearTimeout(this.batchTimer);
             this.batchTimer = null;
         }
-        
+
         if (this.transactionBatch.size > 0) {
             console.log(`[${new Date().toISOString()}] [INFO] Processing final batch of ${this.transactionBatch.size} transactions`);
             await this.processBatch();
         }
-        
+
         if (this.stream) {
             try {
                 this.stream.end();
@@ -1026,7 +1039,7 @@ class SolanaGrpcService {
                 console.warn(`[${new Date().toISOString()}] [WARN] Error ending stream:`, error.message);
             }
         }
-        
+
         if (this.client) {
             try {
                 if (typeof this.client.close === 'function') this.client.close();
@@ -1037,27 +1050,27 @@ class SolanaGrpcService {
             }
             this.client = null;
         }
-        
+
         this.monitoredWallets.clear();
-        
+
         console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service stopped`);
     }
 
     async shutdown() {
         console.log(`[${new Date().toISOString()}] [INFO] Shutting down optimized gRPC service`);
-        
+
         await this.stop();
-        
+
         this.processedTransactions.clear();
         this.recentlyProcessed.clear();
         this.transactionBatch.clear();
-        
+
         try {
             await this.db.close();
         } catch (error) {
             console.error(`[${new Date().toISOString()}] [ERROR] Error closing DB: ${error.message}`);
         }
-        
+
         console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service shutdown complete`);
     }
 
@@ -1078,25 +1091,68 @@ class SolanaGrpcService {
         };
     }
 
-    clearCaches() {
-        console.log(`[${new Date().toISOString()}] [INFO] Manual cache cleanup initiated`);
-        
-        const before = {
-            processedTransactions: this.processedTransactions.size,
-            recentlyProcessed: this.recentlyProcessed.size
-        };
-        
+   forceCleanupCaches() {
+    const before = {
+        processedTransactions: this.processedTransactions.size,
+        recentlyProcessed: this.recentlyProcessed.size
+    };
+    
+    if (this.processedTransactions.size > 1000) {
+        const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
+        toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
+    } else {
         this.processedTransactions.clear();
-        this.recentlyProcessed.clear();
-        
-        console.log(`[${new Date().toISOString()}] [INFO] Cache cleanup completed:`, {
-            before,
-            after: {
-                processedTransactions: this.processedTransactions.size,
-                recentlyProcessed: this.recentlyProcessed.size
-            }
-        });
     }
+    
+    if (this.recentlyProcessed.size > 1000) {
+        const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
+        toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
+    } else {
+        this.recentlyProcessed.clear();
+    }
+    
+    this.lastProcessedCleanup = Date.now();
+    this.lastRecentlyProcessedCleanup = Date.now();
+    
+    const after = {
+        processedTransactions: this.processedTransactions.size,
+        recentlyProcessed: this.recentlyProcessed.size
+    };
+    
+    console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
+    return { before, after };
+}
+
+clearCaches() {
+    console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup initiated`);
+    return this.forceCleanupCaches();
+}
+
+getPerformanceStats() {
+    const now = Date.now();
+    return {
+        monitoredWallets: this.monitoredWallets.size,
+        messagesProcessed: this.messageCount,
+        processedTransactionsCache: this.processedTransactions.size,
+        recentlyProcessedCache: this.recentlyProcessed.size,
+        currentBatchSize: this.transactionBatch.size,
+        solPriceCache: {
+            price: this.solPriceCache.price,
+            lastUpdated: this.solPriceCache.lastUpdated,
+            ageMs: now - this.solPriceCache.lastUpdated
+        },
+        cacheCleanup: {
+            lastProcessedCleanup: this.lastProcessedCleanup,
+            lastRecentlyProcessedCleanup: this.lastRecentlyProcessedCleanup,
+            timeSinceProcessedCleanup: now - this.lastProcessedCleanup,
+            timeSinceRecentlyProcessedCleanup: now - this.lastRecentlyProcessedCleanup,
+            nextProcessedCleanupIn: Math.max(0, this.PROCESSED_CLEANUP_INTERVAL - (now - this.lastProcessedCleanup)),
+            nextRecentlyProcessedCleanupIn: Math.max(0, this.RECENTLY_PROCESSED_CLEANUP_INTERVAL - (now - this.lastRecentlyProcessedCleanup))
+        },
+        reconnectAttempts: this.reconnectAttempts,
+        isHealthy: this.isStarted && this.client !== null && this.stream !== null
+    };
+}
 }
 
 module.exports = SolanaGrpcService;

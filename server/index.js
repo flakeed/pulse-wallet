@@ -200,10 +200,19 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
 
 app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) => {
   try {
-    solanaGrpcService.clearCaches();
+    const { force = false } = req.body;
+    
+    let result;
+    if (force) {
+      result = solanaGrpcService.forceCleanupCaches();
+    } else {
+      result = solanaGrpcService.clearCaches();
+    }
+    
     res.json({
       success: true,
-      message: 'Caches cleared successfully',
+      message: force ? 'Force cache cleanup completed' : 'Manual cache cleanup completed',
+      result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
