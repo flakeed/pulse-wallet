@@ -151,119 +151,217 @@ class SolanaGrpcService {
         }
     }
 
-    async processTransaction(transactionData) {
+async processTransaction(transactionData) {
+    try {
+        let transaction = null, meta = null;
+        
+        if (transactionData.transaction?.transaction) {
+            transaction = transactionData.transaction.transaction;
+            meta = transactionData.transaction.meta;
+        } else if (transactionData.transaction && transactionData.meta) {
+            transaction = transactionData.transaction;
+            meta = transactionData.meta;
+        } else {
+            console.warn(`[${new Date().toISOString()}] [WARN] Unknown transaction format, skipping`);
+            return;
+        }
+
+        if (!transaction || !meta || meta.err) {
+            return; 
+        }
+
+        const signature = this.extractSignature(transactionData);
+        if (!signature || this.processedTransactions.has(signature)) {
+            return;
+        }
+        this.processedTransactions.add(signature);
+
+        let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
+        if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
+        if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
+
+        const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
+        const involvedWallet = Array.from(this.monitoredWallets).find(wallet => 
+            stringAccountKeys.includes(wallet)
+        );
+
+        if (!involvedWallet) return;
+
+        const wallet = await this.db.getWalletByAddress(involvedWallet);
+        if (!wallet || (this.activeGroupId && wallet.group_id !== this.activeGroupId)) {
+            return;
+        }
+
+        const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+
+        await this.processTransactionFromGrpcData({
+            signature,
+            transaction,
+            meta,
+            blockTime,
+            wallet,
+            accountKeys: stringAccountKeys
+        });
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction:`, error.message);
+    }
+}
+
+convertAccountKeysToStrings(accountKeys) {
+    const stringAccountKeys = [];
+    
+    for (const key of accountKeys) {
         try {
-            let transaction = null, meta = null;
-            if (transactionData.transaction?.transaction) {
-                transaction = transactionData.transaction.transaction;
-                meta = transactionData.transaction.meta;
-            } else if (transactionData.transaction && transactionData.meta) {
-                transaction = transactionData.transaction;
-                meta = transactionData.meta;
-            } else if (transactionData.signatures && transactionData.message) {
-                transaction = meta = transactionData;
-            } else if (transactionData.tx) {
-                transaction = transactionData.tx.transaction || transactionData.tx;
-                meta = transactionData.tx.meta || transactionData.meta;
-            } else if (transactionData.slot || transactionData.blockTime) {
-                transaction = transactionData.transaction || transactionData;
-                meta = transactionData.meta || transactionData;
+            let convertedKey;
+            
+            if (key.type === 'Buffer' && Array.isArray(key.data)) {
+                convertedKey = new PublicKey(Buffer.from(key.data)).toString();
+            } else if (Buffer.isBuffer(key)) {
+                convertedKey = new PublicKey(key).toString();
+            } else if (typeof key === 'string') {
+                convertedKey = key;
+            } else if (key && typeof key === 'object') {
+                const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) : 
+                                   key.pubkey || key.key || key.address;
+                convertedKey = pubkeyBuffer ? new PublicKey(pubkeyBuffer).toString() : key.toString();
             } else {
-                console.warn(`[${new Date().toISOString()}] [WARN] Unknown transaction format, skipping`);
-                return;
+                convertedKey = new PublicKey(Buffer.from(key)).toString();
             }
-
-            if (!transaction || !meta) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Missing transaction or meta data, skipping`);
-                return;
+            
+            if (convertedKey.length === 44) {
+                stringAccountKeys.push(convertedKey);
             }
-
-            if (meta.err) {
-                console.log(`[${new Date().toISOString()}] [INFO] Skipping failed transaction with error: ${JSON.stringify(meta.err)}`);
-                return;
-            }
-
-            const signature = this.extractSignature(transactionData) || transactionData.signature;
-            if (!signature) {
-                console.warn(`[${new Date().toISOString()}] [WARN] No signature found, skipping`);
-                return;
-            }
-
-            if (this.processedTransactions.has(signature)) {
-                console.log(`[${new Date().toISOString()}] [INFO] Transaction already processed: signature=${signature}`);
-                return;
-            }
-            this.processedTransactions.add(signature);
-
-            console.log(`[${new Date().toISOString()}] [INFO] Starting processing transaction: signature=${signature}`);
-
-            let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
-            if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
-            if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
-
-            const stringAccountKeys = [];
-            for (const key of accountKeys) {
-                try {
-                    let convertedKey;
-                    if (key.type === 'Buffer' && Array.isArray(key.data)) {
-                        convertedKey = new PublicKey(Buffer.from(key.data)).toString();
-                    } else if (Buffer.isBuffer(key)) {
-                        convertedKey = new PublicKey(key).toString();
-                    } else if (typeof key === 'string') {
-                        convertedKey = key;
-                    } else if (key && typeof key === 'object') {
-                        const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) : key.pubkey ||
-                                            key.key?.type === 'Buffer' ? Buffer.from(key.key.data) : key.key ||
-                                            key.address?.type === 'Buffer' ? Buffer.from(key.address.data) : key.address;
-                        convertedKey = pubkeyBuffer ? new PublicKey(pubkeyBuffer).toString() : key.toString();
-                    } else {
-                        convertedKey = new PublicKey(Buffer.from(key)).toString();
-                    }
-                    if (convertedKey.length === 44) stringAccountKeys.push(convertedKey);
-                } catch (error) {
-                    console.error(`[${new Date().toISOString()}] [ERROR] Error converting account key: ${error.message}`, error.stack);
-                }
-            }
-
-            const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
-            if (!involvedWallet) {
-                console.log(`[${new Date().toISOString()}] [INFO] No monitored wallet in transaction, skipping: signature=${signature}`);
-                return;
-            }
-
-            const wallet = await this.db.getWalletByAddress(involvedWallet);
-            if (!wallet) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Wallet not found in DB: ${involvedWallet}, signature=${signature}`);
-                return;
-            }
-
-            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-                console.log(`[${new Date().toISOString()}] [INFO] Wallet group mismatch, skipping: signature=${signature}`);
-                return;
-            }
-
-            const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
-            const formattedTransactionData = { transaction, meta, slot: transactionData.slot || 0, blockTime };
-            const convertedTransaction = this.convertGrpcToLegacyFormat(formattedTransactionData, stringAccountKeys);
-
-            if (!convertedTransaction) {
-                console.warn(`[${new Date().toISOString()}] [WARN] Failed to convert transaction format: signature=${signature}`);
-                return;
-            }
-
-            await this.monitoringService.processWebhookMessage({
-                signature,
-                walletAddress: involvedWallet,
-                blockTime,
-                groupId: wallet.group_id,
-                transactionData: convertedTransaction
-            });
-
-            console.log(`[${new Date().toISOString()}] [INFO] Transaction processed and sent to webhook: signature=${signature}`);
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`, error.stack);
+            console.error(`[${new Date().toISOString()}] [ERROR] Error converting account key:`, error.message);
         }
     }
+    
+    return stringAccountKeys;
+}
+
+async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
+    try {
+        const existingTx = await this.db.pool.query(
+            'SELECT id FROM transactions WHERE signature = $1 AND wallet_id = $2',
+            [signature, wallet.id]
+        );
+        if (existingTx.rows.length > 0) {
+            return null;
+        }
+
+        const walletIndex = accountKeys.indexOf(wallet.address);
+        if (walletIndex === -1) return null;
+
+        const preBalance = meta.preBalances[walletIndex] || 0;
+        const postBalance = meta.postBalances[walletIndex] || 0;
+        const solChange = (postBalance - preBalance) / 1e9;
+
+        const solPrice = await this.monitoringService.fetchSolPrice();
+
+        const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+            meta,
+            solChange,
+            walletAddress: wallet.address,
+            solPrice
+        });
+
+        if (!transactionType || tokenChanges.length === 0) {
+            return null;
+        }
+
+        const savedTransaction = await this.saveTransactionToDb({
+            wallet,
+            signature,
+            blockTime,
+            transactionType,
+            totalSolAmount,
+            tokenChanges,
+            solPrice
+        });
+
+        if (savedTransaction) {
+            const transactionMessage = {
+                signature,
+                walletAddress: wallet.address,
+                walletName: wallet.name,
+                groupId: wallet.group_id,
+                groupName: wallet.group_name,
+                transactionType,
+                solAmount: totalSolAmount,
+                tokens: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    amount: tc.amount,
+                    symbol: tc.symbol,
+                    name: tc.name
+                })),
+                timestamp: new Date(blockTime * 1000).toISOString()
+            };
+
+            const pipeline = redis.pipeline();
+            pipeline.publish('transactions', JSON.stringify(transactionMessage));
+            if (wallet.group_id) {
+                pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
+            }
+            await pipeline.exec();
+
+            console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} without RPC calls`);
+        }
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
+        throw error;
+    }
+}
+
+async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
+    const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
+    
+    let transactionType = null;
+    let totalSolAmount = 0;
+
+    const usdcPreBalance = (meta.preTokenBalances || []).find(b => 
+        b.mint === USDC_MINT && b.owner === walletAddress
+    );
+    const usdcPostBalance = (meta.postTokenBalances || []).find(b => 
+        b.mint === USDC_MINT && b.owner === walletAddress
+    );
+    
+    let usdcChange = 0;
+    if (usdcPreBalance && usdcPostBalance) {
+        usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) - 
+                     Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
+    } else if (usdcPostBalance) {
+        usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
+    } else if (usdcPreBalance) {
+        usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
+    }
+
+    if (usdcChange < 0) {
+        transactionType = 'buy';
+        totalSolAmount = Math.abs(usdcChange) / solPrice;
+    } else if (usdcChange > 0) {
+        transactionType = 'sell';
+        totalSolAmount = usdcChange / solPrice;
+    } else if (solChange < -0.01) {
+        transactionType = 'buy';
+        totalSolAmount = Math.abs(solChange);
+    } else if (solChange > 0.001) {
+        transactionType = 'sell';
+        totalSolAmount = solChange;
+    } else {
+        return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
+    }
+
+    const tokenChanges = await this.analyzeTokenChangesFromGrpc(
+        meta, 
+        transactionType, 
+        walletAddress
+    );
+
+    return { transactionType, totalSolAmount, tokenChanges };
+}
 
 extractSignature(transactionData) {
     try {

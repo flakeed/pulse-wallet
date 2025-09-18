@@ -8,7 +8,7 @@ class PriceService {
             {
                 commitment: 'confirmed',
                 httpHeaders: {
-                    'User-Agent': 'WalletPulse/2.0'
+                    'User-Agent': 'WalletPulse/3.0'
                 }
             }
         );
@@ -25,20 +25,23 @@ class PriceService {
 
         this.CACHE_TTL = 30;
         this.SOL_PRICE_TTL = 60;
-
+        this.PRICE_CACHE_TTL = 30000;
+        
         this.solPriceCache = {
             price: 150,
             lastUpdated: 0
         };
-
+        
+        this.priceCache = new Map();
+        this.poolCache = new Map();
     }
 
     async updateSolPrice() {
         try {
             const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
-                timeout: 10000,
+                timeout: 8000,
                 headers: {
-                    'User-Agent': 'WalletPulse/2.0'
+                    'User-Agent': 'WalletPulse/3.0'
                 }
             });
 
@@ -56,7 +59,7 @@ class PriceService {
                     };
 
                     try {
-                        await this.redis.setex('sol_price_enhanced', this.SOL_PRICE_TTL, JSON.stringify(this.solPriceCache));
+                        await this.redis.setex('sol_price_optimized', this.SOL_PRICE_TTL, JSON.stringify(this.solPriceCache));
                     } catch (redisError) {
                         console.warn(`[${new Date().toISOString()}] ⚠️ Redis setex failed:`, redisError.message);
                     }
@@ -85,12 +88,22 @@ class PriceService {
     }
 
     async findTokenPools(tokenMint) {
-        const cacheKey = `pools_${tokenMint}`;
+        const cacheKey = `pools_opt_${tokenMint}`;
+
+        const memCached = this.poolCache.get(tokenMint);
+        if (memCached && (Date.now() - memCached.timestamp) < 300000) {
+            return memCached.data;
+        }
 
         try {
             const cached = await this.redis.get(cacheKey);
             if (cached) {
-                return JSON.parse(cached);
+                const pools = JSON.parse(cached);
+                this.poolCache.set(tokenMint, {
+                    data: pools,
+                    timestamp: Date.now()
+                });
+                return pools;
             }
         } catch (error) {
             console.warn(`[${new Date().toISOString()}] ⚠️ Pool cache fetch failed:`, error.message);
@@ -105,8 +118,8 @@ class PriceService {
             }
 
             const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
-                timeout: 10000,
-                headers: { 'User-Agent': 'WalletPulse/2.0' }
+                timeout: 8000,
+                headers: { 'User-Agent': 'WalletPulse/3.0' }
             });
 
             if (response.ok) {
@@ -126,8 +139,13 @@ class PriceService {
                 }
             }
 
+            this.poolCache.set(tokenMint, {
+                data: pools,
+                timestamp: Date.now()
+            });
+
             try {
-                await this.redis.setex(cacheKey, Math.min(this.CACHE_TTL, 300), JSON.stringify(pools));
+                await this.redis.setex(cacheKey, 300, JSON.stringify(pools));
             } catch (redisError) {
                 console.warn(`[${new Date().toISOString()}] ⚠️ Redis pool cache failed:`, redisError.message);
             }
@@ -135,24 +153,20 @@ class PriceService {
             console.error(`[${new Date().toISOString()}] ❌ Pool discovery failed for ${tokenMint}:`, error.message);
         }
 
-        console.log(`[${new Date().toISOString()}] 🏊 Found ${pools.length} pools for ${tokenMint}`);
         return pools;
     }
 
     async getTokenDeploymentTime(tokenMint) {
-        try {
-            console.log(`[${new Date().toISOString()}] 🕐 Fetching deployment time for ${tokenMint}`);
-            
+        try {            
             const mintPubkey = new PublicKey(tokenMint);
             
             const signatures = await this.connection.getSignaturesForAddress(
                 mintPubkey, 
-                { limit: 1000 },
+                { limit: 100 },
                 'confirmed'
             );
 
             if (signatures.length === 0) {
-                console.warn(`[${new Date().toISOString()}] ⚠️ No signatures found for ${tokenMint}`);
                 return null;
             }
 
@@ -160,22 +174,9 @@ class PriceService {
             
             if (firstSignature.blockTime) {
                 const deploymentTime = new Date(firstSignature.blockTime * 1000);
-                console.log(`[${new Date().toISOString()}] ✅ Token ${tokenMint.slice(0,8)}... deployed at: ${deploymentTime.toISOString()}`);
                 return deploymentTime;
             }
 
-            const transaction = await this.connection.getParsedTransaction(
-                firstSignature.signature,
-                { maxSupportedTransactionVersion: 0 }
-            );
-
-            if (transaction && transaction.blockTime) {
-                const deploymentTime = new Date(transaction.blockTime * 1000);
-                console.log(`[${new Date().toISOString()}] ✅ Token ${tokenMint.slice(0,8)}... deployed at: ${deploymentTime.toISOString()} (from tx)`);
-                return deploymentTime;
-            }
-
-            console.warn(`[${new Date().toISOString()}] ⚠️ Could not determine deployment time for ${tokenMint}`);
             return null;
 
         } catch (error) {
@@ -274,42 +275,51 @@ class PriceService {
                 decimals: data.decimals
             };
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to get token supply for ${tokenMint}:`, error.message);
             return { supply: 1000000, decimals: 6 };
         }
     }
 
     async getBasicTokenMetadata(tokenMint) {
         try {
-            const cached = await this.redis.get(`metadata_${tokenMint}`);
+            const cached = await this.redis.get(`metadata_opt_${tokenMint}`);
             if (cached) {
                 return JSON.parse(cached);
             }
 
-            const { fetchOnChainMetadata } = require('./tokenService');
-            const onChainData = await fetchOnChainMetadata(tokenMint, this.connection);
-            const metadata = onChainData || { name: 'Unknown Token', symbol: 'UNK' };
+            const metadata = { 
+                name: `Token ${tokenMint.slice(0, 8)}...`, 
+                symbol: tokenMint.slice(0, 4).toUpperCase() 
+            };
 
             try {
-                await this.redis.setex(`metadata_${tokenMint}`, 300, JSON.stringify(metadata));
+                await this.redis.setex(`metadata_opt_${tokenMint}`, 300, JSON.stringify(metadata));
             } catch (redisError) {
                 console.warn(`[${new Date().toISOString()}] ⚠️ Redis metadata cache failed:`, redisError.message);
             }
             
             return metadata;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to get metadata for ${tokenMint}:`, error.message);
             return { name: 'Unknown Token', symbol: 'UNK' };
         }
     }
 
     async getTokenData(tokenMint) {
-        const cacheKey = `token_data_${tokenMint}`;
+        const cacheKey = `token_data_opt_${tokenMint}`;
+        
+        const memCached = this.priceCache.get(tokenMint);
+        if (memCached && (Date.now() - memCached.timestamp) < this.PRICE_CACHE_TTL) {
+            return memCached.data;
+        }
         
         try {
             const cached = await this.redis.get(cacheKey);
             if (cached) {
-                return JSON.parse(cached);
+                const tokenData = JSON.parse(cached);
+                this.priceCache.set(tokenMint, {
+                    data: tokenData,
+                    timestamp: Date.now()
+                });
+                return tokenData;
             }
         } catch (error) {
             console.warn(`[${new Date().toISOString()}] ⚠️ Token data cache fetch failed:`, error.message);
@@ -330,6 +340,11 @@ class PriceService {
             source: 'price_service'
         };
 
+        this.priceCache.set(tokenMint, {
+            data: tokenData,
+            timestamp: Date.now()
+        });
+
         try {
             await this.redis.setex(cacheKey, this.CACHE_TTL, JSON.stringify(tokenData));
         } catch (error) {
@@ -344,11 +359,9 @@ class PriceService {
             return new Map();
         }
 
-        const startTime = Date.now();
-        
         const results = new Map();
         
-        const batchSize = 10;
+        const batchSize = 5;
         for (let i = 0; i < tokenMints.length; i += batchSize) {
             const batch = tokenMints.slice(i, i + batchSize);
             
@@ -357,7 +370,6 @@ class PriceService {
                     const data = await this.getTokenData(mint);
                     return { mint, data };
                 } catch (error) {
-                    console.error(`[${new Date().toISOString()}] ❌ Error processing ${mint}:`, error.message);
                     return { mint, data: null };
                 }
             });
@@ -372,13 +384,17 @@ class PriceService {
             }
         }
 
-        const duration = Date.now() - startTime;
-        
         return results;
+    }
+
+    clearCache() {
+        this.priceCache.clear();
+        this.poolCache.clear();
     }
 
     async close() {
         try {
+            this.clearCache();
             if (this.redis) {
                 await this.redis.quit();
             }
