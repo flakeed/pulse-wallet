@@ -140,7 +140,7 @@ function TokenCard({ token, onOpenChart }) {
               {/* <span className="text-xs text-gray-500" title={deploymentTime ? `Created: ${new Date(deploymentTime).toLocaleString()}` : 'Creation time unknown'}>
                 {formattedAge}
               </span> */}
-              <span className="text-xs text-gray-500">Unknown</span>
+              {/* <span className="text-xs text-gray-500">Unknown</span> */}
             </div>
           </div>
 
