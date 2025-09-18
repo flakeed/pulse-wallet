@@ -1045,7 +1045,7 @@ getStatus() {
 }
 
     async stop() {
-        console.log(`[${new Date().toISOString()}] [INFO] Stopping optimized gRPC service`);
+        console.log(`[${new Date().toISOString()}] [INFO] Stopping gRPC service`);
 
         this.isStarted = false;
 
@@ -1061,11 +1061,11 @@ getStatus() {
 
         await this.endAllStreams();
 
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service stopped`);
+        console.log(`[${new Date().toISOString()}] [INFO] gRPC service stopped`);
     }
 
     async shutdown() {
-        console.log(`[${new Date().toISOString()}] [INFO] Shutting down optimized gRPC service`);
+        console.log(`[${new Date().toISOString()}] [INFO] Shutting down gRPC service`);
 
         await this.stop();
 
@@ -1081,7 +1081,7 @@ getStatus() {
             console.error(`[${new Date().toISOString()}] [ERROR] Error closing DB: ${error.message}`);
         }
 
-        console.log(`[${new Date().toISOString()}] [INFO] Optimized gRPC service shutdown complete`);
+        console.log(`[${new Date().toISOString()}] [INFO] gRPC service shutdown complete`);
     }
 
     getPerformanceStats() {

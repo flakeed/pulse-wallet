@@ -73,7 +73,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     const hours = parseInt(req.query.hours) || 24;
     const transactionType = req.query.type;
     
-    console.log(`[${new Date().toISOString()}] 🚀 Optimized app initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
+    console.log(`[${new Date().toISOString()}] 🚀 App initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
     const startTime = Date.now();
     
     const [walletCounts, transactions, groups] = await Promise.all([
@@ -86,7 +86,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     const performanceStats = solanaGrpcService.getPerformanceStats();
     
     const duration = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] ⚡ Optimized initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
+    console.log(`[${new Date().toISOString()}] ⚡ Initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
     
     res.json({
       success: true,
@@ -238,7 +238,7 @@ const gracefulShutdown = async (signal) => {
   console.log(`[${new Date().toISOString()}] 🛑 Received ${signal}, shutting down gracefully...`);
   
   try {
-    console.log(`[${new Date().toISOString()}] 🔄 Stopping optimized gRPC service...`);
+    console.log(`[${new Date().toISOString()}] 🔄 Stopping gRPC service...`);
     await solanaGrpcService.shutdown();
     
     console.log(`[${new Date().toISOString()}] 🔄 Stopping other services...`);
@@ -278,7 +278,7 @@ process.on('uncaughtException', (error) => {
   gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
 
-console.log(`[${new Date().toISOString()}] 🚀 Starting optimized wallet monitoring server...`);
+console.log(`[${new Date().toISOString()}] 🚀 Starting wallet monitoring server...`);
 
 setTimeout(() => {
   startGrpcService(solanaGrpcService)();
@@ -287,7 +287,7 @@ setTimeout(() => {
 startSessionCleaner(auth);
 
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Optimized global wallet monitoring server running on https://0.0.0.0:${port}`);
+  console.log(`[${new Date().toISOString()}] 🚀 Global wallet monitoring server running on https://0.0.0.0:${port}`);
   console.log(`[${new Date().toISOString()}] 🔧 Optimizations enabled: Redis caching, transaction batching, memory management`);
-  console.log(`[${new Date().toISOString()}] 📊 Ready to handle 500k+ wallets with gRPC v2`);
+  console.log(`[${new Date().toISOString()}] 📊 Ready to handle wallets with gRPC`);
 });
