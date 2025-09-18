@@ -1,5 +1,5 @@
 const express = require('express');
-const AuthMiddleware = require('../src/middleware/authMiddleware');
+const AuthMiddleware = require('../middleware/authMiddleware');
 
 module.exports = (db, solanaGrpcService) => {
   const router = express.Router();
