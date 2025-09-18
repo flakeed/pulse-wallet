@@ -132,6 +132,8 @@ class SolanaGrpcService {
         if (!signature || this.processedTransactions.has(signature)) return;
         this.processedTransactions.add(signature);
 
+        console.log(`[${new Date().toISOString()}] 📝 Full transaction data for ${signature}:`, JSON.stringify(transactionData, null, 2));
+
         let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
         if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
         if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
