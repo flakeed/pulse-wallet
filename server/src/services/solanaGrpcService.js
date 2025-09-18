@@ -856,7 +856,7 @@ class SolanaGrpcService {
         }
     }
 
-    async subscribeToWalletsBatch(walletAddresses, batchSize = 1000) {
+    async subscribeToWalletsBatch(walletAddresses, batchSize = 10000) {
         const startTime = Date.now();
         let successful = 0;
         let failed = 0;
