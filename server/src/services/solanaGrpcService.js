@@ -1,4 +1,4 @@
-const Client = require('@triton-one/yellowstone-grpc');
+const { Client, CommitmentLevel } = require('@triton-one/yellowstone-grpc');
 const WalletMonitoringService = require('./monitoringService');
 const Database = require('../database/connection');
 
@@ -98,7 +98,7 @@ class SolanaGrpcService {
                 blocks: {},
                 blocksMeta: {},
                 accountsDataSlice: [],
-                commitment: 1,
+                commitment: CommitmentLevel.CONFIRMED,
                 entry: {}
             };
 
