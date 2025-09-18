@@ -8,8 +8,10 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   const [hours, setHours] = useState(timeframe || '24');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sortBy, setSortBy] = useState('latest');
-  const previousTokenMints = useRef(new Set());
+  const [sortBy, setSortBy] = useState('newest'); 
+  const previousNewTokens = useRef(new Set()); 
+
+  const NEW_TOKEN_THRESHOLD_MINUTES = 60;
 
   const aggregateTokens = (transactions, hours, groupId) => {
     const EXCLUDED_TOKENS = [
@@ -51,7 +53,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
               netSOL: 0,
               latestActivity: null,
               deploymentTime: null,
-              ageInHours: null,
+              ageInMinutes: null, 
             },
           });
         }
@@ -70,7 +72,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
             tokenData.summary.deploymentTime = token.deployment_time;
             const deployTime = new Date(token.deployment_time);
             const currentTime = new Date();
-            tokenData.summary.ageInHours = (currentTime - deployTime) / (1000 * 60 * 60);
+            tokenData.summary.ageInMinutes = (currentTime - deployTime) / (1000 * 60);
           }
         }
 
@@ -125,18 +127,28 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     return result;
   };
 
+  const identifyNewTokens = (tokens) => {
+    const now = new Date();
+    const newTokenMints = new Set();
+    
+    tokens.forEach(token => {
+      const deploymentTime = token.summary.deploymentTime;
+      if (deploymentTime) {
+        const ageInMinutes = (now - new Date(deploymentTime)) / (1000 * 60);
+        if (ageInMinutes <= NEW_TOKEN_THRESHOLD_MINUTES) {
+          newTokenMints.add(token.mint);
+        }
+      }
+    });
+    
+    return newTokenMints;
+  };
+
   const sortTokens = (tokens, sortBy) => {
     const sortedTokens = [...tokens];
     
     switch (sortBy) {
-      case 'latest':
-        return sortedTokens.sort((a, b) => {
-          const timeA = new Date(a.summary.latestActivity || 0);
-          const timeB = new Date(b.summary.latestActivity || 0);
-          return timeB - timeA;
-        });
-      
-      case 'newest':
+      case 'newest': 
         return sortedTokens.sort((a, b) => {
           const deployTimeA = a.summary.deploymentTime ? new Date(a.summary.deploymentTime) : new Date(0);
           const deployTimeB = b.summary.deploymentTime ? new Date(b.summary.deploymentTime) : new Date(0);
@@ -146,6 +158,13 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           if (!a.summary.deploymentTime && !b.summary.deploymentTime) return 0;
           
           return deployTimeB - deployTimeA;
+        });
+      
+      case 'latest':
+        return sortedTokens.sort((a, b) => {
+          const timeA = new Date(a.summary.latestActivity || 0);
+          const timeB = new Date(b.summary.latestActivity || 0);
+          return timeB - timeA;
         });
       
       case 'most_wallets':
@@ -176,21 +195,39 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
       const aggregatedTokens = aggregateTokens(transactions, hours, groupId);
       const sortedTokens = sortTokens(aggregatedTokens, sortBy);
       
-      const currentTokenMints = new Set(sortedTokens.map(token => token.mint));
-      const newTokens = sortedTokens.filter(token => !previousTokenMints.current.has(token.mint));
+      const currentNewTokens = identifyNewTokens(sortedTokens);
       
-      if (newTokens.length > 0 && previousTokenMints.current.size > 0) {
-        console.log(`🔊 New tokens detected: ${newTokens.length}`);
-        newTokens.forEach(token => {
-          console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...)`);
+      const previous = new Set(previousNewTokens.current);
+      const newlyDetectedTokens = [...currentNewTokens].filter(mint => !previous.has(mint));
+      
+      if (newlyDetectedTokens.length > 0 && previous.size > 0) {
+        console.log(`🔊 New tokens detected (age < ${NEW_TOKEN_THRESHOLD_MINUTES} min): ${newlyDetectedTokens.length}`);
+        const newTokenDetails = sortedTokens.filter(token => newlyDetectedTokens.includes(token.mint));
+        newTokenDetails.forEach(token => {
+          console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...) - Age: ${token.summary.ageInMinutes?.toFixed(1)} min`);
         });
         
         soundManager.playNewTokenSound();
       }
       
-      previousTokenMints.current = currentTokenMints;
+      previousNewTokens.current = currentNewTokens;
       
-      setItems(sortedTokens);
+      const tokensWithAgeFlag = sortedTokens.map(token => {
+        const isNew = currentNewTokens.has(token.mint);
+        const ageInMinutes = token.summary.ageInMinutes;
+        
+        return {
+          ...token,
+          isNew,
+          age: {
+            isNew,
+            ageInMinutes,
+            createdAt: token.summary.deploymentTime,
+          }
+        };
+      });
+      
+      setItems(tokensWithAgeFlag);
       setError(null);
     } catch (e) {
       setError(e.message);
