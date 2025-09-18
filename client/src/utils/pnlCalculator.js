@@ -30,7 +30,6 @@ export const calculateWalletPnL = (walletData, tokenPrice, solPrice) => {
         realizedPnLSOL = totalReceivedSOL - soldTokensCostBasisSOL;
     }
 
-    /*
     let unrealizedPnLSOL = 0;
     if (currentHoldings > 0 && tokenPrice && solPrice) {
         const currentPriceSOL = tokenPrice / solPrice;
@@ -38,9 +37,6 @@ export const calculateWalletPnL = (walletData, tokenPrice, solPrice) => {
         const remainingCostBasisSOL = currentHoldings * avgBuyPriceSOL;
         unrealizedPnLSOL = currentMarketValueSOL - remainingCostBasisSOL;
     }
-    */
-
-    let unrealizedPnLSOL = 0;
 
     const totalPnLSOL = realizedPnLSOL + unrealizedPnLSOL;
 
@@ -50,7 +46,7 @@ export const calculateWalletPnL = (walletData, tokenPrice, solPrice) => {
         unrealizedPnLSOL: roundToDecimals(unrealizedPnLSOL),
         currentHoldings: roundToDecimals(currentHoldings),
         avgBuyPriceSOL: roundToDecimals(avgBuyPriceSOL),
-        totalPnLUSD: roundToDecimals(totalPnLSOL * (solPrice || 150), 2),
+        totalPnLUSD: roundToDecimals(totalPnLSOL * solPrice, 2),
         soldTokens: roundToDecimals(soldTokens),
         soldPercentage: totalTokensBought > 0 ? roundToDecimals((soldTokens / totalTokensBought) * 100, 1) : 0
     };
@@ -82,9 +78,7 @@ export const calculateTokenPnL = (wallets, tokenPrice, solPrice) => {
     let totalUnrealizedPnLSOL = 0;
 
     const walletPnLs = wallets.map(wallet => {
-        // const walletPnL = calculateWalletPnL(wallet, tokenPrice, solPrice);
-        
-        const walletPnL = calculateWalletPnL(wallet, 0, solPrice || 150);
+        const walletPnL = calculateWalletPnL(wallet, tokenPrice, solPrice);
         
         totalTokensBought += Number(wallet.tokensBought || 0);
         totalTokensSold += Number(wallet.tokensSold || 0);
@@ -101,7 +95,7 @@ export const calculateTokenPnL = (wallets, tokenPrice, solPrice) => {
 
     const currentHoldings = Math.max(0, totalTokensBought - totalTokensSold);
     const avgBuyPriceSOL = totalTokensBought > 0 ? totalSpentSOL / totalTokensBought : 0;
-    const totalPnLSOL = totalRealizedPnLSOL + totalUnrealizedPnLSOL; 
+    const totalPnLSOL = totalRealizedPnLSOL + totalUnrealizedPnLSOL;
     const soldPercentage = totalTokensBought > 0 ? (totalTokensSold / totalTokensBought) * 100 : 0;
 
     return {
@@ -113,7 +107,7 @@ export const calculateTokenPnL = (wallets, tokenPrice, solPrice) => {
         currentHoldings: roundToDecimals(currentHoldings),
         totalSpentSOL: roundToDecimals(totalSpentSOL),
         totalReceivedSOL: roundToDecimals(totalReceivedSOL),
-        totalPnLUSD: roundToDecimals(totalPnLSOL * (solPrice || 150), 2),
+        totalPnLUSD: roundToDecimals(totalPnLSOL * solPrice, 2),
         avgBuyPriceSOL: roundToDecimals(avgBuyPriceSOL),
         soldPercentage: roundToDecimals(soldPercentage, 1),
         walletPnLs

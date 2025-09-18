@@ -1,63 +1,36 @@
-import React, { useState, useMemo } from 'react';
-import { useTokenData } from '../hooks/usePrices';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useTokenData, useSolPrice } from '../hooks/usePrices';
+import { calculateTokenPnL, formatPnL, getPnLColor, formatNumber } from '../utils/pnlCalculator';
 
 function TokenCard({ token, onOpenChart }) {
   const [showDetails, setShowDetails] = useState(true);
   const [showAllWallets, setShowAllWallets] = useState(false);
-  
+  const { solPrice, loading: solLoading } = useSolPrice();
   const { tokenData: data, loading, error } = useTokenData(token.mint);
 
   const WALLETS_DISPLAY_LIMIT = 3;
 
   const groupPnL = useMemo(() => {
-    if (!token.wallets || token.wallets.length === 0) {
+    if (!data || !data.price || !solPrice || loading) {
       return null;
     }
 
-    let totalSpentSOL = 0;
-    let totalReceivedSOL = 0;
-    let totalTokensBought = 0;
-    let totalTokensSold = 0;
-
-    const walletPnLs = token.wallets.map(wallet => {
-      const spentSOL = Number(wallet.solSpent || 0);
-      const receivedSOL = Number(wallet.solReceived || 0);
-      const tokensBought = Number(wallet.tokensBought || 0);
-      const tokensSold = Number(wallet.tokensSold || 0);
-
-      totalSpentSOL += spentSOL;
-      totalReceivedSOL += receivedSOL;
-      totalTokensBought += tokensBought;
-      totalTokensSold += tokensSold;
-
-      const pnlSOL = receivedSOL - spentSOL;
-      
-      return {
-        address: wallet.address,
-        pnl: {
-          totalPnLSOL: pnlSOL,
-          realizedPnLSOL: pnlSOL,
-          unrealizedPnLSOL: 0
-        }
-      };
-    });
-
-    const totalPnLSOL = totalReceivedSOL - totalSpentSOL;
-    const currentHoldings = Math.max(0, totalTokensBought - totalTokensSold);
-    const soldPercentage = totalTokensBought > 0 ? (totalTokensSold / totalTokensBought) * 100 : 0;
-
-    return {
-      totalPnLSOL,
-      realizedPnLSOL: totalPnLSOL,
-      unrealizedPnLSOL: 0,
-      totalSpentSOL,
-      totalReceivedSOL,
-      currentHoldings,
-      soldPercentage,
-      holdingPercentage: 100 - soldPercentage,
-      walletPnLs
+    
+    const calculatedPnL = calculateTokenPnL(token.wallets, data.price, solPrice);
+    
+    const PnL = {
+      ...calculatedPnL,
+      realizedPnLUSD: calculatedPnL.realizedPnLSOL * solPrice,
+      unrealizedPnLUSD: calculatedPnL.unrealizedPnLSOL * solPrice,
+      currentPriceUSD: data.price,
+      currentPriceSOL: data.priceInSol || (data.price / solPrice),
+      marketCap: data.marketCap,
+      holdingPercentage: 100 - calculatedPnL.soldPercentage
     };
-  }, [token.wallets]);
+
+    
+    return PnL;
+  }, [data, solPrice, token.wallets, loading, token.symbol]);
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -76,36 +49,32 @@ function TokenCard({ token, onOpenChart }) {
   };
 
   const formatAge = (ageData) => {
-    if (!ageData || ageData.ageInMinutes === undefined) return 'Unknown';
+    if (!ageData || !ageData.ageInHours) return 'Unknown';
     
-    const ageInMinutes = ageData.ageInMinutes;
+    const ageInHours = ageData.ageInHours;
     
-    if (ageInMinutes < 1) {
-      const seconds = Math.floor(ageInMinutes * 60);
-      return `${seconds}s`;
+    if (ageInHours < 1) {
+      const minutes = Math.floor(ageInHours * 60);
+      return `${minutes}m`;
     }
     
-    if (ageInMinutes < 60) {
-      return `${Math.floor(ageInMinutes)}m`;
+    if (ageInHours < 24) {
+      const hours = Math.floor(ageInHours);
+      return `${hours}h`;
     }
     
-    if (ageInMinutes < 1440) {
-      return `${Math.floor(ageInMinutes / 60)}h`;
+    const days = Math.floor(ageInHours / 24);
+    if (days < 30) {
+      return `${days}d`;
     }
     
-    return `${Math.floor(ageInMinutes / 1440)}d`;
-  };
-
-  const formatPnL = (pnlSOL) => {
-    if (!pnlSOL || isNaN(pnlSOL)) return '0.0000 SOL';
-    const sign = pnlSOL > 0 ? '+' : '';
-    return `${sign}${pnlSOL.toFixed(4)} SOL`;
-  };
-
-  const getPnLColor = (pnlValue) => {
-    if (!pnlValue || isNaN(pnlValue)) return 'text-gray-400';
-    return pnlValue > 0 ? 'text-green-400' : 
-           pnlValue < 0 ? 'text-red-400' : 'text-gray-400';
+    const months = Math.floor(days / 30);
+    if (months < 12) {
+      return `${months}mo`;
+    }
+    
+    const years = Math.floor(days / 365);
+    return `${years}y`;
   };
 
   const handleShowAllWallets = (event) => {
@@ -128,6 +97,8 @@ function TokenCard({ token, onOpenChart }) {
   const deploymentTime = tokenAge?.createdAt;
 
   const displayPnL = groupPnL?.totalPnLSOL || 0;
+  const displayPrice = data?.price || 0;
+  const displayMarketCap = data?.marketCap || 0;
 
   const walletsToShow = showAllWallets ? token.wallets : token.wallets.slice(0, WALLETS_DISPLAY_LIMIT);
   const hasMoreWallets = token.wallets.length > WALLETS_DISPLAY_LIMIT;
@@ -172,7 +143,7 @@ function TokenCard({ token, onOpenChart }) {
 
           <div className="text-right">
             <div className={`text-sm font-bold ${netColor} flex items-center`}>
-              {loading && (
+              {(loading || solLoading) && (
                 <div className="animate-spin rounded-full h-3 w-3 border border-gray-400 border-t-transparent mr-1"></div>
               )}
               {formatPnL(displayPnL)}
@@ -181,6 +152,11 @@ function TokenCard({ token, onOpenChart }) {
             <div className="text-xs text-gray-500">
               {token.summary.uniqueWallets}W · {token.summary.totalBuys}B · {token.summary.totalSells}S
             </div>
+            {!loading && displayPrice > 0 && (
+              <div className="text-xs text-blue-400">
+                ${formatNumber(displayPrice, 8)} · MC: ${formatNumber(displayMarketCap)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -213,40 +189,57 @@ function TokenCard({ token, onOpenChart }) {
           {loading && (
             <div className="flex items-center justify-center py-4">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mr-3"></div>
-              <span className="text-gray-400">Loading token age...</span>
+              <span className="text-gray-400">Loading data...</span>
             </div>
           )}
 
           {error && !loading && (
             <div className="bg-red-900/20 border border-red-700 rounded p-2 mb-3">
-              <div className="text-red-400 text-sm">Failed to load token data</div>
+              <div className="text-red-400 text-sm">Failed to load data</div>
               <div className="text-red-300 text-xs">{error}</div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 mb-3 text-xs">
-            <div>
-              <div className="text-gray-400 mb-1">Token Age</div>
-              <div className="text-white font-medium">
-                {formattedAge}
-                {isNewToken && (
-                  <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
-                )}
-                {deploymentTime && (
+          {data && !loading && (
+            <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
+              <div>
+                <div className="text-gray-400 mb-1">Price</div>
+                <div className="text-white font-medium">
+                  ${displayPrice?.toFixed(8) || 'N/A'}
                   <div className="text-gray-500 text-xs">
-                    Created: {new Date(deploymentTime).toLocaleDateString()}
+                    {data.priceInSol?.toFixed(8) || 'N/A'} SOL
                   </div>
-                )}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Market Cap</div>
+                <div className="text-white font-medium">
+                  ${formatNumber(displayMarketCap)}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Age</div>
+                <div className="text-white font-medium">
+                  {formattedAge}
+                  {isNewToken && (
+                    <span className="text-red-400 text-xs ml-1 animate-pulse">NEW!</span>
+                  )}
+                  {deploymentTime && (
+                    <div className="text-gray-500 text-xs">
+                      {new Date(deploymentTime).toLocaleDateString()}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {groupPnL && (
             <div className="grid grid-cols-2 gap-4 mb-3 text-xs">
               <div>
                 <div className="text-gray-400 mb-1">Holdings</div>
                 <div className="text-white font-medium">
-                  {groupPnL.currentHoldings.toFixed(0)} tokens
+                  {formatNumber(groupPnL.currentHoldings, 0)} tokens
                   <span className="text-gray-500 ml-1">
                     ({groupPnL.holdingPercentage.toFixed(1)}%)
                   </span>
@@ -258,10 +251,22 @@ function TokenCard({ token, onOpenChart }) {
                   {groupPnL.totalSpentSOL.toFixed(4)} / {groupPnL.totalReceivedSOL.toFixed(4)} SOL
                 </div>
               </div>
-              <div className="col-span-2">
-                <div className="text-gray-400 mb-1">Net P&L (SOL only)</div>
-                <div className={`font-medium ${getPnLColor(groupPnL.totalPnLSOL)}`}>
-                  {formatPnL(groupPnL.totalPnLSOL)}
+              <div>
+                <div className="text-gray-400 mb-1">Realized PnL</div>
+                <div className={`font-medium ${getPnLColor(groupPnL.realizedPnLSOL)}`}>
+                  {formatPnL(groupPnL.realizedPnLSOL)}
+                  <div className="text-xs text-gray-500">
+                    ${formatNumber(groupPnL.realizedPnLUSD)}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-400 mb-1">Unrealized PnL</div>
+                <div className={`font-medium ${getPnLColor(groupPnL.unrealizedPnLSOL)}`}>
+                  {formatPnL(groupPnL.unrealizedPnLSOL)}
+                  <div className="text-xs text-gray-500">
+                    ${formatNumber(groupPnL.unrealizedPnLUSD)}
+                  </div>
                 </div>
               </div>
             </div>

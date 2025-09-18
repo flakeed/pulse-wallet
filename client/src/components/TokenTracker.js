@@ -8,10 +8,8 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   const [hours, setHours] = useState(timeframe || '24');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sortBy, setSortBy] = useState('newest'); 
-  const previousNewTokens = useRef(new Set()); 
-
-  const NEW_TOKEN_THRESHOLD_MINUTES = 60;
+  const [sortBy, setSortBy] = useState('latest');
+  const previousTokenMints = useRef(new Set());
 
   const aggregateTokens = (transactions, hours, groupId) => {
     const EXCLUDED_TOKENS = [
@@ -52,8 +50,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
               totalReceivedSOL: 0,
               netSOL: 0,
               latestActivity: null,
-              deploymentTime: null,
-              ageInMinutes: null, 
+              oldestToken: null, 
             },
           });
         }
@@ -68,11 +65,8 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
         }
 
         if (token.deployment_time) {
-          if (!tokenData.summary.deploymentTime || new Date(token.deployment_time) < new Date(tokenData.summary.deploymentTime)) {
-            tokenData.summary.deploymentTime = token.deployment_time;
-            const deployTime = new Date(token.deployment_time);
-            const currentTime = new Date();
-            tokenData.summary.ageInMinutes = (currentTime - deployTime) / (1000 * 60);
+          if (!tokenData.summary.oldestToken || new Date(token.deployment_time) < new Date(tokenData.summary.oldestToken)) {
+            tokenData.summary.oldestToken = token.deployment_time;
           }
         }
 
@@ -127,43 +121,25 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     return result;
   };
 
-  const identifyNewTokens = (tokens) => {
-    const now = new Date();
-    const newTokenMints = new Set();
-    
-    tokens.forEach(token => {
-      const deploymentTime = token.summary.deploymentTime;
-      if (deploymentTime) {
-        const ageInMinutes = (now - new Date(deploymentTime)) / (1000 * 60);
-        if (ageInMinutes <= NEW_TOKEN_THRESHOLD_MINUTES) {
-          newTokenMints.add(token.mint);
-        }
-      }
-    });
-    
-    return newTokenMints;
-  };
-
   const sortTokens = (tokens, sortBy) => {
     const sortedTokens = [...tokens];
     
     switch (sortBy) {
-      case 'newest': 
-        return sortedTokens.sort((a, b) => {
-          const deployTimeA = a.summary.deploymentTime ? new Date(a.summary.deploymentTime) : new Date(0);
-          const deployTimeB = b.summary.deploymentTime ? new Date(b.summary.deploymentTime) : new Date(0);
-          
-          if (!a.summary.deploymentTime && b.summary.deploymentTime) return 1;
-          if (a.summary.deploymentTime && !b.summary.deploymentTime) return -1;
-          if (!a.summary.deploymentTime && !b.summary.deploymentTime) return 0;
-          
-          return deployTimeB - deployTimeA;
-        });
-      
       case 'latest':
         return sortedTokens.sort((a, b) => {
           const timeA = new Date(a.summary.latestActivity || 0);
           const timeB = new Date(b.summary.latestActivity || 0);
+          return timeB - timeA;
+        });
+      
+      case 'newest':
+        return sortedTokens.sort((a, b) => {
+          const timeA = a.summary.oldestToken ? new Date(a.summary.oldestToken) : new Date(0);
+          const timeB = b.summary.oldestToken ? new Date(b.summary.oldestToken) : new Date(0);
+          
+          if (a.summary.oldestToken && !b.summary.oldestToken) return -1;
+          if (!a.summary.oldestToken && b.summary.oldestToken) return 1;
+          
           return timeB - timeA;
         });
       
@@ -195,39 +171,21 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
       const aggregatedTokens = aggregateTokens(transactions, hours, groupId);
       const sortedTokens = sortTokens(aggregatedTokens, sortBy);
       
-      const currentNewTokens = identifyNewTokens(sortedTokens);
+      const currentTokenMints = new Set(sortedTokens.map(token => token.mint));
+      const newTokens = sortedTokens.filter(token => !previousTokenMints.current.has(token.mint));
       
-      const previous = new Set(previousNewTokens.current);
-      const newlyDetectedTokens = [...currentNewTokens].filter(mint => !previous.has(mint));
-      
-      if (newlyDetectedTokens.length > 0 && previous.size > 0) {
-        console.log(`🔊 New tokens detected (age < ${NEW_TOKEN_THRESHOLD_MINUTES} min): ${newlyDetectedTokens.length}`);
-        const newTokenDetails = sortedTokens.filter(token => newlyDetectedTokens.includes(token.mint));
-        newTokenDetails.forEach(token => {
-          console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...) - Age: ${token.summary.ageInMinutes?.toFixed(1)} min`);
+      if (newTokens.length > 0 && previousTokenMints.current.size > 0) {
+        console.log(`🔊 New tokens detected: ${newTokens.length}`);
+        newTokens.forEach(token => {
+          console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...)`);
         });
         
         soundManager.playNewTokenSound();
       }
       
-      previousNewTokens.current = currentNewTokens;
+      previousTokenMints.current = currentTokenMints;
       
-      const tokensWithAgeFlag = sortedTokens.map(token => {
-        const isNew = currentNewTokens.has(token.mint);
-        const ageInMinutes = token.summary.ageInMinutes;
-        
-        return {
-          ...token,
-          isNew,
-          age: {
-            isNew,
-            ageInMinutes,
-            createdAt: token.summary.deploymentTime,
-          }
-        };
-      });
-      
-      setItems(tokensWithAgeFlag);
+      setItems(sortedTokens);
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -245,27 +203,6 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(mintAddress)}`;
     window.location.href = gmgnUrl;
   };
-
-  const formatAge = (ageData) => {
-  if (!ageData || ageData.ageInMinutes === undefined) return 'Unknown';
-  
-  const ageInMinutes = ageData.ageInMinutes;
-  
-  if (ageInMinutes < 1) {
-    const seconds = Math.floor(ageInMinutes * 60);
-    return `${seconds}s`;
-  }
-  
-  if (ageInMinutes < 60) {
-    return `${Math.floor(ageInMinutes)}m`;
-  }
-  
-  if (ageInMinutes < 1440) {
-    return `${Math.floor(ageInMinutes / 60)}h`;
-  }
-  
-  return `${Math.floor(ageInMinutes / 1440)}d`;
-};
 
   return (
     <div className="h-full flex flex-col bg-gray-900">
