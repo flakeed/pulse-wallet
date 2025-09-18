@@ -163,74 +163,109 @@ class SolanaGrpcService {
         }
     }
 
-    async subscribeToAllWallets() {
-        console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets`);
-        const wallets = await this.db.getActiveWallets(null);
-        this.monitoredWallets.clear();
-        wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
-        console.log(`[${new Date().toISOString()}] [INFO] Monitoring ${this.monitoredWallets.size} wallets`);
+async subscribeToAllWallets() {
+    console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets`);
+    const wallets = await this.db.getActiveWallets(null);
+    this.monitoredWallets.clear();
+    wallets.forEach(wallet => this.monitoredWallets.add(wallet.address));
+    console.log(`[${new Date().toISOString()}] 📊 Found ${this.monitoredWallets.size} active wallets globally`);
 
-        if (this.monitoredWallets.size === 0) {
-            console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
-            return;
+    if (this.monitoredWallets.size === 0) {
+        console.warn(`[${new Date().toISOString()}] [WARN] No wallets to monitor, skipping subscription`);
+        return;
+    }
+
+    const CHUNK_SIZE = 5000; 
+    const walletChunks = this.chunkArray(Array.from(this.monitoredWallets), CHUNK_SIZE);
+    
+    console.log(`[${new Date().toISOString()}] [INFO] Creating ${walletChunks.length} chunks for subscription`);
+
+    try {
+        this.streams = [];
+        
+        for (let i = 0; i < walletChunks.length; i++) {
+            const chunk = walletChunks[i];
+            console.log(`[${new Date().toISOString()}] [INFO] Creating stream ${i + 1}/${walletChunks.length} for ${chunk.length} wallets`);
+            
+            await this.createStreamForChunk(chunk, i);
+            
+            if (i < walletChunks.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
         }
 
-        if (this.stream) {
-            console.log(`[${new Date().toISOString()}] [INFO] Ending existing stream before new subscription`);
-            this.stream.end();
-        }
+        console.log(`[${new Date().toISOString()}] [INFO] All streams created successfully`);
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Error creating chunked streams: ${error.message}`);
+        throw error;
+    }
+}
 
-        const request = {
-            accounts: {},
-            slots: {},
-            transactions: {
-                client: {
-                    vote: false,
-                    failed: false,
-                    accountInclude: Array.from(this.monitoredWallets),
-                    accountExclude: [],
-                    accountRequired: []
-                }
-            },
-            transactionsStatus: {},
-            entry: {},
-            blocks: {},
-            blocksMeta: {},
-            commitment: CommitmentLevel.CONFIRMED,
-            accountsDataSlice: []
-        };
+chunkArray(array, chunkSize) {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+        chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
+}
 
-        try {
-            console.log(`[${new Date().toISOString()}] [INFO] Creating gRPC stream`);
-            this.stream = await this.client.subscribe();
-            this.stream.on('data', data => {
-                this.messageCount++;
-                this.handleGrpcMessageBatched(data);
-            });
-            this.stream.on('error', error => {
-                console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error: ${error.message}`);
-                this.handleReconnect();
-            });
-            this.stream.on('end', () => {
-                console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended`);
-                if (this.isStarted) setTimeout(() => this.handleReconnect(), 2000);
-            });
+async createStreamForChunk(walletChunk, chunkIndex) {
+    const request = {
+        accounts: {},
+        slots: {},
+        transactions: {
+            client: {
+                vote: false,
+                failed: false,
+                accountInclude: walletChunk,
+                accountExclude: [],
+                accountRequired: []
+            }
+        },
+        transactionsStatus: {},
+        entry: {},
+        blocks: {},
+        blocksMeta: {},
+        commitment: CommitmentLevel.CONFIRMED,
+        accountsDataSlice: []
+    };
 
-            console.log(`[${new Date().toISOString()}] [INFO] Sending subscription request`);
-            await new Promise((resolve, reject) => this.stream.write(request, err => {
+    try {
+        const stream = await this.client.subscribe();
+        stream.on('data', data => {
+            this.messageCount++;
+            this.handleGrpcMessageBatched(data, chunkIndex);
+        });
+        stream.on('error', error => {
+            console.error(`[${new Date().toISOString()}] [ERROR] Stream ${chunkIndex} error: ${error.message}`);
+            this.handleStreamReconnect(chunkIndex);
+        });
+        stream.on('end', () => {
+            console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} ended`);
+            if (this.isStarted) setTimeout(() => this.handleStreamReconnect(chunkIndex), 2000);
+        });
+
+        await new Promise((resolve, reject) => {
+            stream.write(request, err => {
                 if (err) {
-                    console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed: ${err.message}`);
+                    console.error(`[${new Date().toISOString()}] [ERROR] Stream ${chunkIndex} subscription failed: ${err.message}`);
                     reject(err);
                 } else {
-                    console.log(`[${new Date().toISOString()}] [INFO] Subscription request sent successfully`);
+                    console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} subscription sent successfully`);
                     resolve();
                 }
-            }));
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error in subscribeToAllWallets: ${error.message}`);
-            throw error;
-        }
+            });
+        });
+
+        this.streams[chunkIndex] = stream;
+        console.log(`[${new Date().toISOString()}] [INFO] Stream ${chunkIndex} active, monitoring ${walletChunk.length} wallets`);
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream ${chunkIndex}: ${error.message}`);
+        throw error;
     }
+}
 
     handleGrpcMessageBatched(data) {
         try {
