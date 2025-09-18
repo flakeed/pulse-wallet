@@ -96,14 +96,56 @@ class SolanaGrpcService {
     }
 
     async handleGrpcMessage(data) {
+        const timestamp = new Date().toISOString();
         try {
-            await this.processTransaction(data.transaction);
+            let signature = null;
+            let transaction = null, meta = null;
+            if (data.transaction?.transaction) {
+                transaction = data.transaction.transaction;
+                meta = data.transaction.meta;
+                signature = transaction.signature || (transaction.signatures && transaction.signatures[0])
+                    ? Buffer.from((transaction.signature || transaction.signatures[0]).data || transaction.signature || transaction.signatures[0]).toString('base64')
+                    : data.transaction.signature;
+            } else if (data.transaction && data.meta) {
+                transaction = data.transaction;
+                meta = data.meta;
+                signature = transaction.signature || (transaction.signatures && transaction.signatures[0])
+                    ? Buffer.from((transaction.signature || transaction.signatures[0]).data || transaction.signature || transaction.signatures[0]).toString('base64')
+                    : data.transaction.signature;
+            } else if (data.signatures && data.message) {
+                signature = data.signature || (data.signatures && data.signatures[0])
+                    ? Buffer.from((data.signature || data.signatures[0]).data || data.signature || data.signatures[0]).toString('base64')
+                    : data.signature;
+            } else if (data.tx) {
+                transaction = data.tx.transaction || data.tx;
+                meta = data.tx.meta || data.meta;
+                signature = transaction.signature || (transaction.signatures && transaction.signatures[0])
+                    ? Buffer.from((transaction.signature || transaction.signatures[0]).data || transaction.signature || transaction.signatures[0]).toString('base64')
+                    : data.signature;
+            } else if (data.slot || data.blockTime) {
+                transaction = data.transaction || data;
+                meta = data.meta || data;
+                signature = transaction.signature || (transaction.signatures && transaction.signatures[0])
+                    ? Buffer.from((transaction.signature || transaction.signatures[0]).data || transaction.signature || transaction.signatures[0]).toString('base64')
+                    : data.signature;
+            }
+
+            if (signature) {
+                console.log(`[${timestamp}] 🔍 [SIG:${signature}] Received gRPC transaction message`);
+            } else {
+                console.log(`[${timestamp}] ⚠️ [NO_SIG] Received gRPC message without extractable signature`);
+                return;
+            }
+
+            await this.processTransaction({ transaction, meta, slot: data.slot, blockTime: data.blockTime, signature });
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error handling gRPC message:`, error.message);
+            console.error(`[${timestamp}] ❌ [NO_SIG] Error handling gRPC message:`, error.message);
         }
     }
 
     async processTransaction(transactionData) {
+        const timestamp = new Date().toISOString();
+        const signature = transactionData.signature;
         let transaction = null, meta = null;
         if (transactionData.transaction?.transaction) {
             transaction = transactionData.transaction.transaction;
@@ -120,25 +162,22 @@ class SolanaGrpcService {
             transaction = transactionData.transaction || transactionData;
             meta = transactionData.meta || transactionData;
         } else {
+            console.log(`[${timestamp}] 🚫 [SIG:${signature}] Skipping: Invalid transaction data structure`);
             return;
         }
 
-        if (!transaction || !meta || meta.err) return;
+        if (!transaction || !meta || meta.err) {
+            console.log(`[${timestamp}] 🚫 [SIG:${signature}] Skipping: Missing transaction/meta or has error`);
+            return;
+        }
 
-        const signature = transaction.signature || (transaction.signatures && transaction.signatures[0])
-            ? Buffer.from((transaction.signature || transaction.signatures[0]).data || transaction.signature || transaction.signatures[0]).toString('base64')
-            : transactionData.signature;
-
-        if (!signature || this.processedTransactions.has(signature)) return;
+        if (this.processedTransactions.has(signature)) {
+            console.log(`[${timestamp}] ⏭️ [SIG:${signature}] Skipping: Already processed`);
+            return;
+        }
         this.processedTransactions.add(signature);
 
-        console.log(`[${new Date().toISOString()}] 📝 Signature: ${signature}`);
-
-        // Track specific transaction
-        const isTargetTx = signature === '3eVLbMKNQM5MMMFZ9gmqK7SmmuAy6JWyWegkicYw48cAwNi5bWCGGsJV75yxmkVhuGZek2sm21mviJBPVLDiGmS9';
-        if (isTargetTx) {
-            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Starting processing`);
-        }
+        console.log(`[${timestamp}] 📝 [SIG:${signature}] Starting processing new transaction`);
 
         let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
         if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
@@ -162,74 +201,51 @@ class SolanaGrpcService {
                 } else {
                     convertedKey = new PublicKey(Buffer.from(key)).toString();
                 }
-                if (convertedKey.length === 44) {
-                    stringAccountKeys.push(convertedKey);
-                } else if (isTargetTx) {
-                    console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Invalid key length ${convertedKey?.length || 'null'} for key:`, key);
-                }
-            } catch (error) {
-                if (isTargetTx) {
-                    console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Error converting key:`, error.message, 'Raw key:', key);
-                }
-            }
+                if (convertedKey.length === 44) stringAccountKeys.push(convertedKey);
+            } catch (error) {}
         }
 
-        if (isTargetTx) {
-            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Found ${stringAccountKeys.length} valid accounts from ${accountKeys.length} raw keys`);
-        }
+        console.log(`[${timestamp}] 🔑 [SIG:${signature}] Extracted ${stringAccountKeys.length} account keys`);
 
         const involvedWallet = Array.from(this.monitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
         if (!involvedWallet) {
-            if (isTargetTx) {
-                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: No monitored wallets found in ${stringAccountKeys.length} accounts`);
-            }
+            console.log(`[${timestamp}] 🚫 [SIG:${signature}] No monitored wallet involved`);
             return;
         }
+
+        console.log(`[${timestamp}] 👛 [SIG:${signature}] Involved wallet: ${involvedWallet}`);
 
         const wallet = await this.db.getWalletByAddress(involvedWallet);
-        if (!wallet) {
-            if (isTargetTx) {
-                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Wallet ${involvedWallet} not found in database`);
-            }
+        if (!wallet || (this.activeGroupId && wallet.group_id !== this.activeGroupId)) {
+            console.log(`[${timestamp}] 🚫 [SIG:${signature}] Wallet not found in DB or group mismatch (groupId: ${this.activeGroupId})`);
             return;
         }
 
-        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-            if (isTargetTx) {
-                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Wallet ${involvedWallet} belongs to different group (${wallet.group_id} != ${this.activeGroupId})`);
-            }
-            return;
-        }
+        console.log(`[${timestamp}] ✅ [SIG:${signature}] Wallet validated in DB (groupId: ${wallet.group_id})`);
 
         const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
-        if (isTargetTx) {
-            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Matched wallet ${involvedWallet}, group ${wallet.group_id || 'none'}, blockTime ${blockTime}`);
-        }
-
         const formattedTransactionData = { transaction, meta, slot: transactionData.slot || 0, blockTime };
         const convertedTransaction = this.convertGrpcToLegacyFormat(formattedTransactionData, stringAccountKeys);
 
         if (!convertedTransaction) {
-            if (isTargetTx) {
-                console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Failed to convert to legacy format`);
-            }
+            console.error(`[${timestamp}] ❌ [SIG:${signature}] Failed to convert to legacy format`);
             return;
         }
 
-        if (isTargetTx) {
-            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Sending to webhook processor`);
-        }
+        console.log(`[${timestamp}] 🔄 [SIG:${signature}] Converted to legacy format successfully`);
 
-        await this.monitoringService.processWebhookMessage({
-            signature,
-            walletAddress: involvedWallet,
-            blockTime,
-            groupId: wallet.group_id,
-            transactionData: convertedTransaction
-        });
-
-        if (isTargetTx) {
-            console.log(`[${new Date().toISOString()}] 🔍 Tracking transaction ${signature}: Completed webhook processing`);
+        try {
+            console.log(`[${timestamp}] 🚀 [SIG:${signature}] Sending to monitoring service (webhook/SSE)`);
+            await this.monitoringService.processWebhookMessage({
+                signature,
+                walletAddress: involvedWallet,
+                blockTime,
+                groupId: wallet.group_id,
+                transactionData: convertedTransaction
+            });
+            console.log(`[${timestamp}] ✅ [SIG:${signature}] Successfully sent to monitoring service (webhook/SSE)`);
+        } catch (error) {
+            console.error(`[${timestamp}] ❌ [SIG:${signature}] Error sending to monitoring service:`, error.message);
         }
     }
 
