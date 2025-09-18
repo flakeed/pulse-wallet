@@ -36,7 +36,7 @@ class WalletMonitoringService {
         };
         this.isProcessingQueue = false;
         this.queueKey = 'grpc:queue';
-        this.batchSize = 1000;
+        this.batchSize = 400;
         this.solPriceCache = {
             price: 150,
             lastUpdated: 0,
@@ -57,7 +57,6 @@ class WalletMonitoringService {
             const requestData = await redis.lpop(this.queueKey, this.batchSize);
             if (!requestData || requestData.length === 0) break;
     
-            const startTime = Date.now();
             const requests = requestData.map((data) => {
                 try {
                     return JSON.parse(data);
@@ -128,7 +127,6 @@ class WalletMonitoringService {
                 
                 await pipeline.exec();
             }
-            console.log(`[${new Date().toISOString()}] [INFO] Processed batch of ${requests.length} transactions in ${Date.now() - startTime}ms`);
         }
     
         this.isProcessingQueue = false;
@@ -423,6 +421,7 @@ class WalletMonitoringService {
             }
         }
 
+        const mintChanges = new Map();
         for (const [key, change] of allBalanceChanges) {
             if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT) {
                 continue;
@@ -445,15 +444,41 @@ class WalletMonitoringService {
             }
 
             if (isValidChange) {
-                const tokenInfo = await fetchTokenMetadata(change.mint, this.connection);
-                tokenChanges.push({
-                    mint: change.mint,
-                    rawChange: rawChange,
-                    decimals: change.decimals,
-                    symbol: tokenInfo?.symbol || 'Unknown',
-                    name: tokenInfo?.name || 'Unknown Token'
-                });
+                if (mintChanges.has(change.mint)) {
+                    const existing = mintChanges.get(change.mint);
+                    existing.totalRawChange += Math.abs(rawChange);
+                } else {
+                    mintChanges.set(change.mint, {
+                        mint: change.mint,
+                        decimals: change.decimals,
+                        totalRawChange: Math.abs(rawChange)
+                    });
+                    console.log(`[${new Date().toISOString()}] 🆕 New mint change: ${change.mint} = ${Math.abs(rawChange)}`);
+                }
             }
+        }
+
+        if (mintChanges.size === 0) {
+            return [];
+        }
+
+        const mints = Array.from(mintChanges.keys());
+        const tokenInfos = await this.batchFetchTokenMetadata(mints);
+
+        for (const [mint, aggregatedChange] of mintChanges) {
+            const tokenInfo = tokenInfos.get(mint) || {
+                symbol: 'Unknown',
+                name: 'Unknown Token',
+                decimals: aggregatedChange.decimals,
+            };
+
+            tokenChanges.push({
+                mint: mint,
+                rawChange: aggregatedChange.totalRawChange,
+                decimals: aggregatedChange.decimals,
+                symbol: tokenInfo.symbol,
+                name: tokenInfo.name,
+            });
         }
 
         return tokenChanges;
@@ -549,7 +574,7 @@ class WalletMonitoringService {
             let paramIndex = 1;
             
             if (groupId) {
-                query += ` AND w.group_id = $${paramIndex}::uuid`;
+                query += ` AND w.group_id = ${paramIndex}::uuid`;
                 params.push(groupId);
             }
             
