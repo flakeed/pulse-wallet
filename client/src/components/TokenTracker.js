@@ -246,6 +246,27 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     window.location.href = gmgnUrl;
   };
 
+  const formatAge = (ageData) => {
+  if (!ageData || ageData.ageInMinutes === undefined) return 'Unknown';
+  
+  const ageInMinutes = ageData.ageInMinutes;
+  
+  if (ageInMinutes < 1) {
+    const seconds = Math.floor(ageInMinutes * 60);
+    return `${seconds}s`;
+  }
+  
+  if (ageInMinutes < 60) {
+    return `${Math.floor(ageInMinutes)}m`;
+  }
+  
+  if (ageInMinutes < 1440) {
+    return `${Math.floor(ageInMinutes / 60)}h`;
+  }
+  
+  return `${Math.floor(ageInMinutes / 1440)}d`;
+};
+
   return (
     <div className="h-full flex flex-col bg-gray-900">
       <CompactControls
