@@ -1,6 +1,9 @@
-module.exports = (auth, db, solanaGrpcService) => {
-  const express = require('express');
+const express = require('express');
+const AuthMiddleware = require('../src/middleware/authMiddleware');
+
+module.exports = (db, solanaGrpcService) => {
   const router = express.Router();
+  const auth = new AuthMiddleware(db);
 
   router.get('/', auth.authRequired, async (req, res) => {
     try {
@@ -40,7 +43,11 @@ module.exports = (auth, db, solanaGrpcService) => {
   router.post('/switch', auth.authRequired, async (req, res) => {
     try {
       const { groupId } = req.body;
-      
+
+      if (groupId && (typeof groupId !== 'number' || !Number.isInteger(groupId))) {
+        return res.status(400).json({ error: 'Invalid groupId: must be an integer or omitted' });
+      }
+
       if (groupId) {
         const query = `SELECT id FROM groups WHERE id = $1`;
         const result = await db.pool.query(query, [groupId]);
@@ -48,15 +55,19 @@ module.exports = (auth, db, solanaGrpcService) => {
           return res.status(404).json({ error: 'Group not found' });
         }
       }
-      
-      await solanaGrpcService.switchGroup(groupId); 
+
+      await solanaGrpcService.switchGroup(groupId);
       res.json({
         success: true,
-        message: `Switched to global group ${groupId || 'all'} via gRPC`,
+        message: `Switched to global group ${groupId || 'all'}`,
       });
     } catch (error) {
       console.error(`[${new Date().toISOString()}] ❌ Error switching group:`, error);
-      res.status(500).json({ error: 'Failed to switch group' });
+      if (error.message.includes('gRPC')) {
+        res.status(503).json({ error: 'gRPC service unavailable' });
+      } else {
+        res.status(500).json({ error: 'Failed to switch group' });
+      }
     }
   });
 
