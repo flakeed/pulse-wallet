@@ -296,7 +296,7 @@ class SolanaGrpcService {
             const result = await this.processTransaction(data.transaction);
             if (result) {
                 this.stats.totalProcessed++;
-                console.log(`[${new Date().toISOString()}] ⚡ REALTIME: Processed ${result.signature} immediately`);
+                console.log(`[${new Date().toISOString()}] ⚡ Processed ${result.signature} immediately`);
             }
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Failed immediate processing:`, error.message);
@@ -687,7 +687,7 @@ class SolanaGrpcService {
                 console.error(`[${new Date().toISOString()}] ❌ Redis publish error:`, error.message);
             });
 
-            console.log(`[${new Date().toISOString()}] ⚡ REALTIME SENT: ${signature} (${transactionType}) for ${wallet.address.slice(0, 8)}...`);
+            console.log(`[${new Date().toISOString()}] ⚡ SENT: ${signature} (${transactionType}) for ${wallet.address.slice(0, 8)}...`);
 
             if (this.realtimeMode) {
                 this.saveTransactionToDbAsync({
