@@ -142,8 +142,14 @@ app.get('/api/health', (req, res) => {
   
   res.json({ 
     status: 'ok', 
-    message: 'Optimized backend running with Full Stream gRPC',
+    message: `Optimized backend running with Full Stream in ${grpcStatus.realtimeMode ? 'REALTIME' : 'BATCH'} mode`,
     timestamp: new Date().toISOString(),
+    mode: {
+      realtime: grpcStatus.realtimeMode,
+      description: grpcStatus.realtimeMode 
+        ? 'Processing transactions immediately for real-time display' 
+        : 'Processing transactions in batches for efficiency'
+    },
     grpc: {
       connected: grpcStatus.isConnected,
       started: grpcStatus.isStarted,
@@ -155,12 +161,13 @@ app.get('/api/health', (req, res) => {
       mode: grpcStatus.mode
     },
     performance: {
-      streamType: 'full_solana_stream',
+      streamType: grpcStatus.realtimeMode ? 'realtime_solana_stream' : 'batch_solana_stream',
       totalReceived: performanceStats.messagesReceived,
       totalFiltered: performanceStats.messagesFiltered,
       totalProcessed: performanceStats.messagesProcessed,
       filterEfficiency: `${performanceStats.filterEfficiency}%`,
       avgFilterTime: `${performanceStats.avgFilterTimeMs.toFixed(3)}ms`,
+      currentBatchSize: performanceStats.currentBatchSize,
       caches: {
         processedTransactions: performanceStats.caches.processedTransactions,
         recentlyProcessed: performanceStats.caches.recentlyProcessed,
@@ -174,7 +181,9 @@ app.get('/api/health', (req, res) => {
       },
       isHealthy: performanceStats.isHealthy
     },
-    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING_V3'
+    optimization: grpcStatus.realtimeMode 
+      ? 'REALTIME_STREAM_OPTIMIZED_V4'
+      : 'BATCH_STREAM_OPTIMIZED_V3'
   });
 });
 

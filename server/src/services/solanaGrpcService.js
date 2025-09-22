@@ -31,11 +31,16 @@ class SolanaGrpcService {
             lastUpdated: 0,
             cacheTimeout: 60000
         };
+        this.priceUpdateInProgress = false;
 
-        this.transactionBatch = new Map();
-        this.batchTimer = null;
-        this.batchSize = 500; 
-        this.batchTimeout = 50; 
+        this.realtimeMode = process.env.REALTIME_MODE === 'true' || true;
+        this.batchSize = this.realtimeMode ? 1 : 500;
+        this.batchTimeout = this.realtimeMode ? 0 : 50;
+
+        if (!this.realtimeMode) {
+            this.transactionBatch = new Map();
+            this.batchTimer = null;
+        }
 
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
@@ -57,12 +62,11 @@ class SolanaGrpcService {
         this.setupCacheCleanup();
         this.setupStatsReporting();
 
-        console.log(`[${new Date().toISOString()}] 🚀 Full Stream Service initialized`);
+        console.log(`[${new Date().toISOString()}] 🚀 Full Stream Service initialized in ${this.realtimeMode ? 'REALTIME' : 'BATCH'} mode`);
         console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
     setupStatsReporting() {
-
         setInterval(() => {
             const now = Date.now();
             const timeDiff = (now - this.stats.lastStatsUpdate) / 1000;
@@ -71,7 +75,7 @@ class SolanaGrpcService {
                 this.stats.filterEfficiency = ((this.stats.totalFiltered / this.stats.totalReceived) * 100).toFixed(2);
             }
 
-            console.log(`[${new Date().toISOString()}] 📊 Performance Stats:`);
+            console.log(`[${new Date().toISOString()}] 📊 Performance Stats (${this.realtimeMode ? 'REALTIME' : 'BATCH'} mode):`);
             console.log(`  📥 Total received: ${this.stats.totalReceived} tx (${(this.stats.totalReceived / timeDiff).toFixed(1)} tx/s)`);
             console.log(`  🎯 Filtered out: ${this.stats.totalFiltered} (${this.stats.filterEfficiency}%)`);
             console.log(`  ✅ Processed: ${this.stats.totalProcessed}`);
@@ -146,7 +150,7 @@ class SolanaGrpcService {
             return;
         }
 
-        console.log(`[${new Date().toISOString()}] 🚀 Starting full Solana stream for group ${groupId || 'all'}`);
+        console.log(`[${new Date().toISOString()}] 🚀 Starting full Solana stream for group ${groupId || 'all'} in ${this.realtimeMode ? 'REALTIME' : 'BATCH'} mode`);
 
         this.isStarted = true;
         this.activeGroupId = groupId;
@@ -155,7 +159,7 @@ class SolanaGrpcService {
             await this.loadMonitoredWallets(groupId);
             await this.createFullStream();
 
-            console.log(`[${new Date().toISOString()}] ✅ Full stream service started successfully`);
+            console.log(`[${new Date().toISOString()}] ✅ Full stream service started successfully in ${this.realtimeMode ? 'REALTIME' : 'BATCH'} mode`);
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Failed to start full stream service:`, error.message);
             this.isStarted = false;
@@ -163,105 +167,82 @@ class SolanaGrpcService {
         }
     }
 
-async createFullStream() {
-    await this.endStream();
+    async createFullStream() {
+        await this.endStream();
 
-    try {
-        console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
+        try {
+            console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
 
-        this.client = new Client(this.grpcEndpoint, undefined, {
-            'grpc.keepalive_time_ms': 30000,
-            'grpc.keepalive_timeout_ms': 5000,
-            'grpc.keepalive_permit_without_calls': true,
-            'grpc.http2.max_pings_without_data': 0,
-            'grpc.http2.min_time_between_pings_ms': 10000,
-            'grpc.http2.min_ping_interval_without_data_ms': 300000,
-            'grpc.max_receive_message_length': 256 * 1024 * 1024,
-            'grpc.max_send_message_length': 256 * 1024 * 1024,
-            'grpc.http2.max_concurrent_streams': 1000,
-            'grpc.keepalive_without_calls': true
-        });
+            this.client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_timeout_ms': 5000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 10000,
+                'grpc.http2.min_ping_interval_without_data_ms': 300000,
+                'grpc.max_receive_message_length': 256 * 1024 * 1024,
+                'grpc.max_send_message_length': 256 * 1024 * 1024,
+                'grpc.http2.max_concurrent_streams': 1000,
+                'grpc.keepalive_without_calls': true
+            });
 
-        this.stream = await this.client.subscribe();
+            this.stream = await this.client.subscribe();
 
-        this.stream.on('data', data => {
-            this.messageCount++;
-            this.stats.totalReceived++;
-            this.handleFullStreamMessage(data);
-        });
+            this.stream.on('data', data => {
+                this.messageCount++;
+                this.stats.totalReceived++;
+                this.handleFullStreamMessage(data);
+            });
 
-        this.stream.on('error', error => {
-            console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
-            this.handleReconnect();
-        });
+            this.stream.on('error', error => {
+                console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
+                this.handleReconnect();
+            });
 
-        this.stream.on('end', () => {
-            console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
-            if (this.isStarted) {
-                setTimeout(() => this.handleReconnect(), 2000);
-            }
-        });
-
-        const request = {
-
-            accounts: {},
-            slots: {},
-
-            transactions: {
-
-                [""]: {  
-                    vote: false,           
-                    failed: false,         
-                    accountInclude: [],    
-                    accountExclude: [],    
-                    accountRequired: []    
-                }
-            },
-
-            transactionsStatus: {},
-            entry: {},
-            blocks: {},
-            blocksMeta: {},
-
-            commitment: CommitmentLevel.CONFIRMED,
-
-            accountsDataSlice: []
-        };
-
-        console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
-
-        await new Promise((resolve, reject) => {
-            this.stream.write(request, err => {
-                if (err) {
-                    console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
-                    console.error(`[${new Date().toISOString()}] 🔍 Request structure:`, JSON.stringify(request, null, 2));
-                    reject(err);
-                } else {
-                    console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
-                    resolve();
+            this.stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
+                if (this.isStarted) {
+                    setTimeout(() => this.handleReconnect(), 2000);
                 }
             });
-        });
 
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
-        throw error;
-    }
-}
+            const request = {
+                accounts: {},
+                slots: {},
+                transactions: {
+                    [""]: {  
+                        vote: false,           
+                        failed: false,         
+                        accountInclude: [],    
+                        accountExclude: [],    
+                        accountRequired: []    
+                    }
+                },
+                transactionsStatus: {},
+                entry: {},
+                blocks: {},
+                blocksMeta: {},
+                commitment: CommitmentLevel.CONFIRMED,
+                accountsDataSlice: []
+            };
 
-    async endStream() {
-        try {
-            if (this.stream) {
-                this.stream.end();
-                this.stream = null;
-            }
-            if (this.client) {
-                if (typeof this.client.close === 'function') this.client.close();
-                else if (typeof this.client.destroy === 'function') this.client.destroy();
-                this.client = null;
-            }
+            console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
+
+            await new Promise((resolve, reject) => {
+                this.stream.write(request, err => {
+                    if (err) {
+                        console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
+                        reject(err);
+                    } else {
+                        console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
+                        resolve();
+                    }
+                });
+            });
+
         } catch (error) {
-            console.warn(`[${new Date().toISOString()}] ⚠️ Error ending stream:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
+            throw error;
         }
     }
 
@@ -279,7 +260,7 @@ async createFullStream() {
 
             const filterStart = process.hrtime.bigint();
             const isRelevant = this.quickFilterTransaction(data.transaction);
-            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000; 
+            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000;
 
             if (!isRelevant) {
                 this.stats.totalFiltered++;
@@ -287,18 +268,22 @@ async createFullStream() {
                 return;
             }
 
-            this.transactionBatch.set(signature, data);
+            if (this.realtimeMode) {
 
-            if (!this.batchTimer) {
-                this.batchTimer = setTimeout(() => {
+                this.processTransactionImmediately(data);
+            } else {
+
+                this.transactionBatch.set(signature, data);
+                if (!this.batchTimer) {
+                    this.batchTimer = setTimeout(() => {
+                        this.processBatch();
+                    }, this.batchTimeout);
+                }
+                if (this.transactionBatch.size >= this.batchSize) {
+                    clearTimeout(this.batchTimer);
+                    this.batchTimer = null;
                     this.processBatch();
-                }, this.batchTimeout);
-            }
-
-            if (this.transactionBatch.size >= this.batchSize) {
-                clearTimeout(this.batchTimer);
-                this.batchTimer = null;
-                this.processBatch();
+                }
             }
 
         } catch (error) {
@@ -306,14 +291,63 @@ async createFullStream() {
         }
     }
 
+    async processTransactionImmediately(data) {
+        try {
+            const result = await this.processTransaction(data.transaction);
+            if (result) {
+                this.stats.totalProcessed++;
+                console.log(`[${new Date().toISOString()}] ⚡ REALTIME: Processed ${result.signature} immediately`);
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Failed immediate processing:`, error.message);
+        }
+    }
+
+    async processBatch() {
+        if (!this.transactionBatch || this.transactionBatch.size === 0) return;
+
+        const batch = new Map(this.transactionBatch);
+        this.transactionBatch.clear();
+        this.batchTimer = null;
+
+        console.log(`[${new Date().toISOString()}] ⚡ Processing filtered batch: ${batch.size} relevant transactions`);
+
+        const promises = Array.from(batch.entries()).map(([signature, data]) =>
+            this.processTransaction(data.transaction).catch(error => {
+                console.error(`[${new Date().toISOString()}] ❌ Failed to process ${signature}:`, error.message);
+                return null;
+            })
+        );
+
+        const results = await Promise.allSettled(promises);
+        const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
+
+        this.stats.totalProcessed += successful;
+        console.log(`[${new Date().toISOString()}] ✅ Batch completed: ${successful}/${batch.size} successful`);
+    }
+
+    async endStream() {
+        try {
+            if (this.stream) {
+                this.stream.end();
+                this.stream = null;
+            }
+            if (this.client) {
+                if (typeof this.client.close === 'function') this.client.close();
+                else if (typeof this.client.destroy === 'function') this.client.destroy();
+                this.client = null;
+            }
+        } catch (error) {
+            console.warn(`[${new Date().toISOString()}] ⚠️ Error ending stream:`, error.message);
+        }
+    }
+
     quickFilterTransaction(transactionData) {
         try {
-
             const accountKeys = this.extractAllAccountKeys(transactionData);
 
             for (const accountKey of accountKeys) {
                 if (this.monitoredWallets.has(accountKey)) {
-
                     if (this.activeGroupId) {
                         const walletGroup = this.walletToGroup.get(accountKey);
                         if (walletGroup === this.activeGroupId) {
@@ -384,7 +418,6 @@ async createFullStream() {
                         accountKeys.push(convertedKey);
                     }
                 } catch (conversionError) {
-
                     continue;
                 }
             }
@@ -394,30 +427,6 @@ async createFullStream() {
         }
 
         return accountKeys;
-    }
-
-    async processBatch() {
-        if (this.transactionBatch.size === 0) return;
-
-        const batch = new Map(this.transactionBatch);
-        this.transactionBatch.clear();
-        this.batchTimer = null;
-
-        console.log(`[${new Date().toISOString()}] ⚡ Processing filtered batch: ${batch.size} relevant transactions`);
-
-        const promises = Array.from(batch.entries()).map(([signature, data]) =>
-            this.processTransaction(data.transaction).catch(error => {
-                console.error(`[${new Date().toISOString()}] ❌ Failed to process ${signature}:`, error.message);
-                return null;
-            })
-        );
-
-        const results = await Promise.allSettled(promises);
-        const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-
-        this.stats.totalProcessed += successful;
-
-        console.log(`[${new Date().toISOString()}] ✅ Batch completed: ${successful}/${batch.size} successful`);
     }
 
     async processTransaction(transactionData) {
@@ -485,7 +494,6 @@ async createFullStream() {
             if (this.monitoredWallets.has(accountKey)) {
                 const walletMetadata = this.walletMetadata.get(accountKey);
                 if (walletMetadata) {
-
                     if (this.activeGroupId && walletMetadata.group_id !== this.activeGroupId) {
                         continue;
                     }
@@ -500,28 +508,32 @@ async createFullStream() {
     }
 
     async fetchSolPrice() {
-        const now = Date.now();
 
-        if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
+        const cacheAge = Date.now() - this.solPriceCache.lastUpdated;
+        const maxCacheAge = this.realtimeMode ? 300000 : 60000; 
+
+        if (this.solPriceCache.price && cacheAge < maxCacheAge) {
             return this.solPriceCache.price;
         }
 
-        try {
-            const cachedPrice = await redis.get('sol_price_grpc');
-            if (cachedPrice) {
-                const priceData = JSON.parse(cachedPrice);
-                this.solPriceCache = {
-                    price: priceData.price,
-                    lastUpdated: priceData.timestamp,
-                    cacheTimeout: 60000
-                };
-                return priceData.price;
-            }
+        if (!this.priceUpdateInProgress) {
+            this.priceUpdateInProgress = true;
+            this.updateSolPriceInBackground();
+        }
 
-            const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
-                timeout: 5000,
-                headers: { 'User-Agent': 'WalletPulse/3.0' }
-            });
+        return this.solPriceCache.price || 150;
+    }
+
+    async updateSolPriceInBackground() {
+        try {
+            const timeout = this.realtimeMode ? 2000 : 5000; 
+
+            const response = await Promise.race([
+                fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+                    headers: { 'User-Agent': 'WalletPulse/3.0' }
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeout))
+            ]);
 
             if (response.ok) {
                 const data = await response.json();
@@ -533,23 +545,21 @@ async createFullStream() {
 
                     this.solPriceCache = {
                         price: newPrice,
-                        lastUpdated: now,
+                        lastUpdated: Date.now(),
                         cacheTimeout: 60000
                     };
 
                     await redis.setex('sol_price_grpc', 60, JSON.stringify({
                         price: newPrice,
-                        timestamp: now
+                        timestamp: Date.now()
                     }));
-
-                    return newPrice;
                 }
             }
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
+            console.warn(`[${new Date().toISOString()}] ⚠️ Background SOL price update failed:`, error.message);
+        } finally {
+            this.priceUpdateInProgress = false;
         }
-
-        return this.solPriceCache.price;
     }
 
     async handleReconnect() {
@@ -586,7 +596,6 @@ async createFullStream() {
         console.log(`[${new Date().toISOString()}] 🔄 Switching full stream to group ${groupId || 'all'}`);
 
         this.activeGroupId = groupId;
-
         await this.loadMonitoredWallets(groupId);
 
         console.log(`[${new Date().toISOString()}] ✅ Switched to group ${groupId || 'all'}: monitoring ${this.monitoredWallets.size.toLocaleString()} wallets`);
@@ -602,7 +611,6 @@ async createFullStream() {
         console.log(`[${new Date().toISOString()}] ➕ Adding ${walletAddresses.length} wallets to full stream monitoring`);
 
         const successful = walletAddresses.length;
-
         await this.loadMonitoredWallets(this.activeGroupId);
 
         console.log(`[${new Date().toISOString()}] ✅ Wallet monitoring updated: ${this.monitoredWallets.size.toLocaleString()} total wallets`);
@@ -630,65 +638,6 @@ async createFullStream() {
         };
     }
 
-    getStatus() {
-        return {
-            isConnected: this.stream !== null,
-            isStarted: this.isStarted,
-            activeGroupId: this.activeGroupId,
-            totalSubscriptions: this.monitoredWallets.size,
-            numStreams: 1, 
-            messageCount: this.messageCount,
-            filteredCount: this.filteredCount,
-            reconnectAttempts: this.reconnectAttempts,
-            grpcEndpoint: this.grpcEndpoint,
-            mode: 'full_stream_with_filtering',
-            performance: {
-                totalReceived: this.stats.totalReceived,
-                totalFiltered: this.stats.totalFiltered,
-                totalProcessed: this.stats.totalProcessed,
-                filterEfficiency: this.stats.filterEfficiency,
-                avgFilterTime: this.stats.avgFilterTime,
-                batchSize: this.batchSize,
-                batchTimeout: this.batchTimeout,
-                solPriceCached: this.solPriceCache.lastUpdated > 0,
-                cacheStats: {
-                    processedTransactions: this.processedTransactions.size,
-                    recentlyProcessed: this.recentlyProcessed.size,
-                    walletMetadata: this.walletMetadata.size,
-                    solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
-                    solPrice: this.solPriceCache.price
-                }
-            }
-        };
-    }
-
-    getPerformanceStats() {
-        const now = Date.now();
-        return {
-            mode: 'full_stream_optimized',
-            totalMonitoredWallets: this.monitoredWallets.size,
-            messagesReceived: this.messageCount,
-            messagesFiltered: this.filteredCount,
-            messagesProcessed: this.stats.totalProcessed,
-            filterEfficiency: this.stats.filterEfficiency,
-            avgFilterTimeMs: this.stats.avgFilterTime,
-            currentBatchSize: this.transactionBatch.size,
-            caches: {
-                processedTransactions: this.processedTransactions.size,
-                recentlyProcessed: this.recentlyProcessed.size,
-                walletMetadata: this.walletMetadata.size,
-                walletToGroup: this.walletToGroup.size
-            },
-            solPriceCache: {
-                price: this.solPriceCache.price,
-                lastUpdated: this.solPriceCache.lastUpdated,
-                ageMs: now - this.solPriceCache.lastUpdated
-            },
-            reconnectAttempts: this.reconnectAttempts,
-            isHealthy: this.isStarted && this.stream !== null
-        };
-    }
-
     async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
         try {
             const walletIndex = accountKeys.indexOf(wallet.address);
@@ -698,7 +647,7 @@ async createFullStream() {
             const postBalance = meta.postBalances[walletIndex] || 0;
             const solChange = (postBalance - preBalance) / 1e9;
 
-            const solPrice = await this.fetchSolPrice();
+            const solPrice = await this.fetchSolPrice(); 
 
             const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
                 meta,
@@ -711,51 +660,79 @@ async createFullStream() {
                 return null;
             }
 
-            const savedTransaction = await this.saveTransactionToDb({
-                wallet,
+            const transactionMessage = {
                 signature,
-                blockTime,
+                walletAddress: wallet.address,
+                walletName: wallet.name,
+                groupId: wallet.group_id,
+                groupName: wallet.group_name,
                 transactionType,
-                totalSolAmount,
-                tokenChanges,
-                solPrice
-            });
+                solAmount: totalSolAmount,
+                tokens: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    amount: tc.amount,
+                    symbol: tc.symbol,
+                    name: tc.name
+                })),
+                timestamp: new Date(blockTime * 1000).toISOString()
+            };
 
-            if (savedTransaction) {
-                const transactionMessage = {
-                    signature,
-                    walletAddress: wallet.address,
-                    walletName: wallet.name,
-                    groupId: wallet.group_id,
-                    groupName: wallet.group_name,
-                    transactionType,
-                    solAmount: totalSolAmount,
-                    tokens: tokenChanges.map(tc => ({
-                        mint: tc.mint,
-                        amount: tc.amount,
-                        symbol: tc.symbol,
-                        name: tc.name
-                    })),
-                    timestamp: new Date(blockTime * 1000).toISOString()
-                };
-
-                const pipeline = redis.pipeline();
-                pipeline.publish('transactions', JSON.stringify(transactionMessage));
-                if (wallet.group_id) {
-                    pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
-                }
-                await pipeline.exec();
-
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType}) for wallet ${wallet.address.slice(0, 8)}...`);
-                return savedTransaction;
+            const pipeline = redis.pipeline();
+            pipeline.publish('transactions', JSON.stringify(transactionMessage));
+            if (wallet.group_id) {
+                pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
             }
 
-            return null;
+            pipeline.exec().catch(error => {
+                console.error(`[${new Date().toISOString()}] ❌ Redis publish error:`, error.message);
+            });
+
+            console.log(`[${new Date().toISOString()}] ⚡ REALTIME SENT: ${signature} (${transactionType}) for ${wallet.address.slice(0, 8)}...`);
+
+            if (this.realtimeMode) {
+                this.saveTransactionToDbAsync({
+                    wallet,
+                    signature,
+                    blockTime,
+                    transactionType,
+                    totalSolAmount,
+                    tokenChanges,
+                    solPrice
+                });
+            } else {
+
+                await this.saveTransactionToDb({
+                    wallet,
+                    signature,
+                    blockTime,
+                    transactionType,
+                    totalSolAmount,
+                    tokenChanges,
+                    solPrice
+                });
+            }
+
+            return {
+                signature: signature,
+                type: transactionType,
+                solAmount: totalSolAmount,
+                tokensChanged: tokenChanges,
+            };
 
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
             return null;
         }
+    }
+
+    async saveTransactionToDbAsync(transactionData) {
+        setImmediate(async () => {
+            try {
+                await this.saveTransactionToDb(transactionData);
+            } catch (error) {
+                console.error(`[${new Date().toISOString()}] ❌ Background DB save error:`, error.message);
+            }
+        });
     }
 
     async saveTransactionToDb({ wallet, signature, blockTime, transactionType, totalSolAmount, tokenChanges, solPrice }) {
@@ -979,27 +956,50 @@ async createFullStream() {
             return [];
         }
 
-        const mints = Array.from(mintChanges.keys());
-        const tokenInfos = await this.batchFetchTokenMetadataCached(mints);
-
         for (const [mint, aggregatedChange] of mintChanges) {
-            const tokenInfo = tokenInfos.get(mint) || {
-                symbol: mint.slice(0, 4).toUpperCase(),
-                name: `Token ${mint.slice(0, 8)}...`,
-                decimals: aggregatedChange.decimals,
-            };
-
             tokenChanges.push({
                 mint: mint,
                 amount: aggregatedChange.totalRawChange / Math.pow(10, aggregatedChange.decimals),
                 rawChange: aggregatedChange.totalRawChange,
                 decimals: aggregatedChange.decimals,
-                symbol: tokenInfo.symbol,
-                name: tokenInfo.name,
+                symbol: mint.slice(0, 4).toUpperCase(), 
+                name: `Token ${mint.slice(0, 8)}...`, 
             });
         }
 
+        if (this.realtimeMode) {
+            this.updateTokenMetadataInBackground(Array.from(mintChanges.keys()));
+        } else {
+
+            try {
+                const mints = Array.from(mintChanges.keys());
+                const tokenInfos = await this.batchFetchTokenMetadataCached(mints);
+
+                for (let i = 0; i < tokenChanges.length; i++) {
+                    const tokenChange = tokenChanges[i];
+                    const tokenInfo = tokenInfos.get(tokenChange.mint);
+                    if (tokenInfo) {
+                        tokenChange.symbol = tokenInfo.symbol;
+                        tokenChange.name = tokenInfo.name;
+                    }
+                }
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Failed to get token metadata:`, error.message);
+            }
+        }
+
         return tokenChanges;
+    }
+
+    async updateTokenMetadataInBackground(mints) {
+        setImmediate(async () => {
+            try {
+                await this.batchFetchTokenMetadataCached(mints);
+                console.log(`[${new Date().toISOString()}] 🔄 Background metadata updated for ${mints.length} tokens`);
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] ⚠️ Background metadata update failed:`, error.message);
+            }
+        });
     }
 
     async batchFetchTokenMetadataCached(mints) {
@@ -1089,6 +1089,67 @@ async createFullStream() {
         }
     }
 
+    getStatus() {
+        return {
+            isConnected: this.stream !== null,
+            isStarted: this.isStarted,
+            activeGroupId: this.activeGroupId,
+            totalSubscriptions: this.monitoredWallets.size,
+            numStreams: 1, 
+            messageCount: this.messageCount,
+            filteredCount: this.filteredCount,
+            reconnectAttempts: this.reconnectAttempts,
+            grpcEndpoint: this.grpcEndpoint,
+            mode: this.realtimeMode ? 'realtime_stream_optimized' : 'batch_stream_optimized',
+            realtimeMode: this.realtimeMode,
+            performance: {
+                totalReceived: this.stats.totalReceived,
+                totalFiltered: this.stats.totalFiltered,
+                totalProcessed: this.stats.totalProcessed,
+                filterEfficiency: this.stats.filterEfficiency,
+                avgFilterTime: this.stats.avgFilterTime,
+                batchSize: this.batchSize,
+                batchTimeout: this.batchTimeout,
+                solPriceCached: this.solPriceCache.lastUpdated > 0,
+                cacheStats: {
+                    processedTransactions: this.processedTransactions.size,
+                    recentlyProcessed: this.recentlyProcessed.size,
+                    walletMetadata: this.walletMetadata.size,
+                    solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
+                    solPrice: this.solPriceCache.price
+                }
+            }
+        };
+    }
+
+    getPerformanceStats() {
+        const now = Date.now();
+        return {
+            mode: this.realtimeMode ? 'realtime_stream_optimized' : 'batch_stream_optimized',
+            totalMonitoredWallets: this.monitoredWallets.size,
+            messagesReceived: this.messageCount,
+            messagesFiltered: this.filteredCount,
+            messagesProcessed: this.stats.totalProcessed,
+            filterEfficiency: this.stats.filterEfficiency,
+            avgFilterTimeMs: this.stats.avgFilterTime,
+            currentBatchSize: this.realtimeMode ? 0 : (this.transactionBatch ? this.transactionBatch.size : 0),
+            realtimeMode: this.realtimeMode,
+            caches: {
+                processedTransactions: this.processedTransactions.size,
+                recentlyProcessed: this.recentlyProcessed.size,
+                walletMetadata: this.walletMetadata.size,
+                walletToGroup: this.walletToGroup.size
+            },
+            solPriceCache: {
+                price: this.solPriceCache.price,
+                lastUpdated: this.solPriceCache.lastUpdated,
+                ageMs: now - this.solPriceCache.lastUpdated
+            },
+            reconnectAttempts: this.reconnectAttempts,
+            isHealthy: this.isStarted && this.stream !== null
+        };
+    }
+
     forceCleanupCaches() {
         const before = {
             processedTransactions: this.processedTransactions.size,
@@ -1119,17 +1180,17 @@ async createFullStream() {
             walletMetadata: this.walletMetadata.size
         };
 
-        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed for full stream:`, { before, after });
+        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed for ${this.realtimeMode ? 'realtime' : 'batch'} stream:`, { before, after });
         return { before, after };
     }
 
     clearCaches() {
-        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup for full stream`);
+        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup for ${this.realtimeMode ? 'realtime' : 'batch'} stream`);
         return this.forceCleanupCaches();
     }
 
     async stop() {
-        console.log(`[${new Date().toISOString()}] ⏹️ Stopping full stream service`);
+        console.log(`[${new Date().toISOString()}] ⏹️ Stopping ${this.realtimeMode ? 'realtime' : 'batch'} stream service`);
 
         this.isStarted = false;
 
@@ -1138,24 +1199,26 @@ async createFullStream() {
             this.batchTimer = null;
         }
 
-        if (this.transactionBatch.size > 0) {
+        if (!this.realtimeMode && this.transactionBatch && this.transactionBatch.size > 0) {
             console.log(`[${new Date().toISOString()}] ⚡ Processing final batch of ${this.transactionBatch.size} transactions`);
             await this.processBatch();
         }
 
         await this.endStream();
 
-        console.log(`[${new Date().toISOString()}] ✅ Full stream service stopped`);
+        console.log(`[${new Date().toISOString()}] ✅ ${this.realtimeMode ? 'Realtime' : 'Batch'} stream service stopped`);
     }
 
     async shutdown() {
-        console.log(`[${new Date().toISOString()}] 🛑 Shutting down full stream service`);
+        console.log(`[${new Date().toISOString()}] 🛑 Shutting down ${this.realtimeMode ? 'realtime' : 'batch'} stream service`);
 
         await this.stop();
 
         this.processedTransactions.clear();
         this.recentlyProcessed.clear();
-        this.transactionBatch.clear();
+        if (this.transactionBatch) {
+            this.transactionBatch.clear();
+        }
         this.monitoredWallets.clear();
         this.walletToGroup.clear();
         this.walletMetadata.clear();
@@ -1166,7 +1229,7 @@ async createFullStream() {
             console.error(`[${new Date().toISOString()}] ❌ Error closing DB:`, error.message);
         }
 
-        console.log(`[${new Date().toISOString()}] ✅ Full stream service shutdown complete`);
+        console.log(`[${new Date().toISOString()}] ✅ ${this.realtimeMode ? 'Realtime' : 'Batch'} stream service shutdown complete`);
     }
 }
 
