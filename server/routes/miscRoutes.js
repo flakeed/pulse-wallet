@@ -170,7 +170,7 @@ module.exports = (auth, db, priceService, solanaGrpcService) => {
           processingTime: duration,
           subBatches: Math.ceil(uniqueMints.length / SUB_BATCH_SIZE),
           warnings: warnings.length > 0 ? warnings : undefined,
-          dataSource: 'enhanced_price_service_v2'
+          dataSource: 'price_service'
         }
       });
     } catch (error) {

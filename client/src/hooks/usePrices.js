@@ -458,7 +458,7 @@ export const usePrices = (tokenMint = null) => {
   return {
     solPrice,
     tokenPrice,
-    enhancedTokenData: tokenData,
+    tokenData: tokenData,
     loading: solLoading || tokenLoading,
     error: solError || tokenError,
     ready: solPrice !== null && (!tokenMint || tokenPrice !== undefined)
