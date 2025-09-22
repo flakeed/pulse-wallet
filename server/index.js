@@ -5,7 +5,7 @@ const fs = require('fs');
 require('dotenv').config();
 
 const Database = require('./src/database/connection');
-const SolanaGrpcService = require('./src/services/solanaGrpcService');
+const SolanaGrpcService = require('./src/services/solanaGrpcService'); 
 const AuthMiddleware = require('./middleware/authMiddleware');
 const PriceService = require('./src/services/priceService');
 const { redis } = require('./src/services/tokenService');
@@ -101,25 +101,27 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         monitoring: {
           isMonitoring: grpcStatus.isConnected && grpcStatus.isStarted,
           processedSignatures: grpcStatus.messageCount,
-          activeWallets: performanceStats.monitoredWallets,
+          activeWallets: performanceStats.totalMonitoredWallets,
           activeGroupId: grpcStatus.activeGroupId,
-          mode: 'optimized_grpc',
+          mode: 'full_stream_optimized',
           performance: {
-            messagesProcessed: performanceStats.messagesProcessed,
-            cacheStats: performanceStats.solPriceCache,
-            batchSize: performanceStats.currentBatchSize,
+            messagesReceived: performanceStats.messagesReceived,
+            messagesFiltered: performanceStats.messagesFiltered,
+            filterEfficiency: performanceStats.filterEfficiency,
+            avgFilterTime: performanceStats.avgFilterTimeMs,
             isHealthy: performanceStats.isHealthy
           }
         },
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'OPTIMIZED_GRPC_V2',
+          optimizationLevel: 'FULL_STREAM_OPTIMIZED_V3',
           cacheHits: {
             solPrice: performanceStats.solPriceCache.ageMs < 60000,
-            processedTransactions: performanceStats.processedTransactionsCache,
-            recentlyProcessed: performanceStats.recentlyProcessedCache
-          }
+            processedTransactions: performanceStats.caches.processedTransactions,
+            walletMetadata: performanceStats.caches.walletMetadata
+          },
+          streamingMode: 'full_solana_with_client_filtering'
         }
       }
     });
@@ -129,7 +131,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     res.status(500).json({ 
       error: 'Failed to initialize application data',
       details: error.message,
-      optimization: 'OPTIMIZED_GRPC_V2'
+      optimization: 'FULL_STREAM_OPTIMIZED_V3'
     });
   }
 });
@@ -140,34 +142,39 @@ app.get('/api/health', (req, res) => {
   
   res.json({ 
     status: 'ok', 
-    message: 'Optimized backend running with gRPC v2',
+    message: 'Optimized backend running with Full Stream gRPC',
     timestamp: new Date().toISOString(),
     grpc: {
       connected: grpcStatus.isConnected,
       started: grpcStatus.isStarted,
       activeGroup: grpcStatus.activeGroupId,
-      monitoredWallets: grpcStatus.subscriptions,
+      monitoredWallets: grpcStatus.totalSubscriptions,
       messageCount: grpcStatus.messageCount,
+      filteredCount: grpcStatus.filteredCount,
       reconnectAttempts: grpcStatus.reconnectAttempts,
       mode: grpcStatus.mode
     },
     performance: {
-      messagesProcessed: performanceStats.messagesProcessed,
+      streamType: 'full_solana_stream',
+      totalReceived: performanceStats.messagesReceived,
+      totalFiltered: performanceStats.messagesFiltered,
+      totalProcessed: performanceStats.messagesProcessed,
+      filterEfficiency: `${performanceStats.filterEfficiency}%`,
+      avgFilterTime: `${performanceStats.avgFilterTimeMs.toFixed(3)}ms`,
       caches: {
-        processedTransactions: performanceStats.processedTransactionsCache,
-        recentlyProcessed: performanceStats.recentlyProcessedCache,
+        processedTransactions: performanceStats.caches.processedTransactions,
+        recentlyProcessed: performanceStats.caches.recentlyProcessed,
+        walletMetadata: performanceStats.caches.walletMetadata,
+        walletToGroup: performanceStats.caches.walletToGroup,
         solPrice: {
           cached: performanceStats.solPriceCache.lastUpdated > 0,
           price: performanceStats.solPriceCache.price,
           ageMs: performanceStats.solPriceCache.ageMs
         }
       },
-      batch: {
-        currentSize: performanceStats.currentBatchSize,
-        isHealthy: performanceStats.isHealthy
-      }
+      isHealthy: performanceStats.isHealthy
     },
-    optimization: 'GRPC_V2_WITH_CACHING'
+    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING_V3'
   });
 });
 
@@ -186,14 +193,30 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
       version: process.version
     },
     optimization: {
-      level: 'OPTIMIZED_GRPC_V2',
+      level: 'FULL_STREAM_OPTIMIZED_V3',
       features: [
-        'Redis caching',
-        'Transaction batching',
-        'Memory optimization',
-        'Duplicate prevention',
-        'Automatic cache cleanup'
-      ]
+        'Full Solana transaction stream',
+        'Client-side wallet filtering',
+        'O(1) wallet lookup with Set/Map',
+        'Batched transaction processing',
+        'Smart cache management',
+        'Real-time filter efficiency monitoring',
+        'Automatic cache cleanup',
+        'Single connection resilience'
+      ],
+      advantages: [
+        'Scales to millions of wallets',
+        'No node subscription limits',
+        'Better reliability (1 connection vs many)',
+        'Real-time performance monitoring',
+        'Efficient memory usage'
+      ],
+      metrics: {
+        efficiency: `${performanceStats.filterEfficiency}% of transactions filtered out`,
+        avgFilterTime: `${performanceStats.avgFilterTimeMs.toFixed(3)}ms per transaction`,
+        monitoredWallets: performanceStats.totalMonitoredWallets.toLocaleString(),
+        streamMode: 'Full Solana blockchain streaming'
+      }
     }
   });
 });
@@ -213,7 +236,8 @@ app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) =
       success: true,
       message: force ? 'Force cache cleanup completed' : 'Manual cache cleanup completed',
       result,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      cacheType: 'full_stream_optimized'
     });
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Error clearing caches:`, error);
@@ -223,6 +247,36 @@ app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) =
       details: error.message
     });
   }
+});
+
+app.get('/api/filter-stats', auth.authRequired, (req, res) => {
+  const stats = solanaGrpcService.getPerformanceStats();
+  const status = solanaGrpcService.getStatus();
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    filteringPerformance: {
+      efficiency: `${stats.filterEfficiency}%`,
+      avgFilterTime: `${stats.avgFilterTimeMs.toFixed(3)}ms`,
+      totalReceived: stats.messagesReceived,
+      totalFiltered: stats.messagesFiltered,
+      totalProcessed: stats.messagesProcessed,
+      monitoredWallets: stats.totalMonitoredWallets
+    },
+    streamHealth: {
+      connected: status.isConnected,
+      started: status.isStarted,
+      reconnectAttempts: status.reconnectAttempts,
+      activeGroup: status.activeGroupId,
+      streamMode: status.mode
+    },
+    recommendations: stats.filterEfficiency < 95 ? [
+      'Filter efficiency below 95% - consider optimizing wallet data structures',
+      'Check if too many irrelevant transactions are being processed'
+    ] : [
+      'Filter performance is optimal'
+    ]
+  });
 });
 
 app.use('/api/auth', authRoutes(auth, db));
@@ -238,7 +292,7 @@ const gracefulShutdown = async (signal) => {
   console.log(`[${new Date().toISOString()}] 🛑 Received ${signal}, shutting down gracefully...`);
   
   try {
-    console.log(`[${new Date().toISOString()}] 🔄 Stopping gRPC service...`);
+    console.log(`[${new Date().toISOString()}] 🔄 Stopping full stream gRPC service...`);
     await solanaGrpcService.shutdown();
     
     console.log(`[${new Date().toISOString()}] 🔄 Stopping other services...`);
@@ -278,7 +332,7 @@ process.on('uncaughtException', (error) => {
   gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
 
-console.log(`[${new Date().toISOString()}] 🚀 Starting wallet monitoring server...`);
+console.log(`[${new Date().toISOString()}] 🚀 Starting wallet monitoring server with Full Stream optimization...`);
 
 setTimeout(() => {
   startGrpcService(solanaGrpcService)();
@@ -287,7 +341,8 @@ setTimeout(() => {
 startSessionCleaner(auth);
 
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Global wallet monitoring server running on https://0.0.0.0:${port}`);
-  console.log(`[${new Date().toISOString()}] 🔧 Optimizations enabled: Redis caching, transaction batching, memory management`);
-  console.log(`[${new Date().toISOString()}] 📊 Ready to handle wallets with gRPC`);
+  console.log(`[${new Date().toISOString()}] 🚀 Full Stream wallet monitoring server running on https://0.0.0.0:${port}`);
+  console.log(`[${new Date().toISOString()}] 🔧 Optimizations enabled: Full Solana stream, client-side filtering, O(1) lookups`);
+  console.log(`[${new Date().toISOString()}] 📊 Ready to handle unlimited wallets with optimized filtering`);
+  console.log(`[${new Date().toISOString()}] 🎯 Expected performance: 99%+ filter efficiency, <1ms filter time`);
 });
