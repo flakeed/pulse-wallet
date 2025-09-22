@@ -342,7 +342,5 @@ startSessionCleaner(auth);
 
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] 🚀 Full Stream wallet monitoring server running on https://0.0.0.0:${port}`);
-  console.log(`[${new Date().toISOString()}] 🔧 Optimizations enabled: Full Solana stream, client-side filtering, O(1) lookups`);
   console.log(`[${new Date().toISOString()}] 📊 Ready to handle unlimited wallets with optimized filtering`);
-  console.log(`[${new Date().toISOString()}] 🎯 Expected performance: 99%+ filter efficiency, <1ms filter time`);
 });

@@ -57,7 +57,7 @@ class SolanaGrpcService {
         this.setupCacheCleanup();
         this.setupStatsReporting();
 
-        console.log(`[${new Date().toISOString()}] 🚀 Optimized Full Stream Service initialized`);
+        console.log(`[${new Date().toISOString()}] 🚀 Full Stream Service initialized`);
         console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
@@ -163,82 +163,91 @@ class SolanaGrpcService {
         }
     }
 
-    async createFullStream() {
-        await this.endStream();
+async createFullStream() {
+    await this.endStream();
 
-        try {
-            console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
+    try {
+        console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
 
-            this.client = new Client(this.grpcEndpoint, undefined, {
-                'grpc.keepalive_time_ms': 30000,
-                'grpc.keepalive_timeout_ms': 5000,
-                'grpc.keepalive_permit_without_calls': true,
-                'grpc.http2.max_pings_without_data': 0,
-                'grpc.http2.min_time_between_pings_ms': 10000,
-                'grpc.http2.min_ping_interval_without_data_ms': 300000,
-                'grpc.max_receive_message_length': 256 * 1024 * 1024, 
-                'grpc.max_send_message_length': 256 * 1024 * 1024,
-                'grpc.http2.max_concurrent_streams': 1000,
-                'grpc.keepalive_without_calls': true
-            });
+        this.client = new Client(this.grpcEndpoint, undefined, {
+            'grpc.keepalive_time_ms': 30000,
+            'grpc.keepalive_timeout_ms': 5000,
+            'grpc.keepalive_permit_without_calls': true,
+            'grpc.http2.max_pings_without_data': 0,
+            'grpc.http2.min_time_between_pings_ms': 10000,
+            'grpc.http2.min_ping_interval_without_data_ms': 300000,
+            'grpc.max_receive_message_length': 256 * 1024 * 1024,
+            'grpc.max_send_message_length': 256 * 1024 * 1024,
+            'grpc.http2.max_concurrent_streams': 1000,
+            'grpc.keepalive_without_calls': true
+        });
 
-            this.stream = await this.client.subscribe();
+        this.stream = await this.client.subscribe();
 
-            this.stream.on('data', data => {
-                this.messageCount++;
-                this.stats.totalReceived++;
-                this.handleFullStreamMessage(data);
-            });
+        this.stream.on('data', data => {
+            this.messageCount++;
+            this.stats.totalReceived++;
+            this.handleFullStreamMessage(data);
+        });
 
-            this.stream.on('error', error => {
-                console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
-                this.handleReconnect();
-            });
+        this.stream.on('error', error => {
+            console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
+            this.handleReconnect();
+        });
 
-            this.stream.on('end', () => {
-                console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
-                if (this.isStarted) {
-                    setTimeout(() => this.handleReconnect(), 2000);
+        this.stream.on('end', () => {
+            console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
+            if (this.isStarted) {
+                setTimeout(() => this.handleReconnect(), 2000);
+            }
+        });
+
+        const request = {
+
+            accounts: {},
+            slots: {},
+
+            transactions: {
+
+                [""]: {  
+                    vote: false,           
+                    failed: false,         
+                    accountInclude: [],    
+                    accountExclude: [],    
+                    accountRequired: []    
+                }
+            },
+
+            transactionsStatus: {},
+            entry: {},
+            blocks: {},
+            blocksMeta: {},
+
+            commitment: CommitmentLevel.CONFIRMED,
+
+            accountsDataSlice: []
+        };
+
+        console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
+
+        await new Promise((resolve, reject) => {
+            this.stream.write(request, err => {
+                if (err) {
+                    console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
+                    console.error(`[${new Date().toISOString()}] 🔍 Request structure:`, JSON.stringify(request, null, 2));
+                    reject(err);
+                } else {
+                    console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
+                    resolve();
                 }
             });
+        });
 
-            const request = {
-                accounts: {},
-                slots: {},
-                transactions: {
-                    client: {
-                        vote: false,           
-                        failed: false,         
-
-                    }
-                },
-                transactionsStatus: {},
-                entry: {},
-                blocks: {},
-                blocksMeta: {},
-                commitment: CommitmentLevel.CONFIRMED,
-                accountsDataSlice: []
-            };
-
-            console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
-
-            await new Promise((resolve, reject) => {
-                this.stream.write(request, err => {
-                    if (err) {
-                        console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
-                        reject(err);
-                    } else {
-                        console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
-                        resolve();
-                    }
-                });
-            });
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
-            throw error;
-        }
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
+        throw error;
     }
+}
 
     async endStream() {
         try {
