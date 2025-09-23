@@ -33,7 +33,7 @@ class SolanaGrpcService {
         };
         this.priceUpdateInProgress = false;
 
-        this.realtimeMode = process.env.REALTIME_MODE === 'true' || true;
+        this.realtimeMode = 'false';
         this.batchSize = this.realtimeMode ? 1 : 500;
         this.batchTimeout = this.realtimeMode ? 0 : 50;
 
