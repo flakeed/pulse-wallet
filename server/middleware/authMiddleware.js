@@ -108,36 +108,46 @@ class AuthMiddleware {
         return result.rows[0];
     }
 
-    authRequired = async (req, res, next) => {
-        try {
-            const authHeader = req.headers.authorization;
-            if (!authHeader || !authHeader.startsWith('Bearer ')) {
-                return res.status(401).json({ error: 'No valid authorization header' });
-            }
+   authRequired = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        const sessionToken = authHeader && authHeader.startsWith('Bearer ')
+            ? authHeader.substring(7)
+            : req.query.token;
 
-            const sessionToken = authHeader.substring(7);
-            const session = await this.validateSession(sessionToken);
-            
-            if (!session) {
-                return res.status(401).json({ error: 'Invalid or expired session' });
-            }
+        console.log(`[${new Date().toISOString()}] 🔐 Auth check:`, {
+            token: sessionToken,
+            source: req.query.token ? 'query' : 'header'
+        });
 
-            req.user = {
-                id: session.user_id,
-                telegramId: session.telegram_id,
-                username: session.username,
-                firstName: session.first_name,
-                lastName: session.last_name,
-                isAdmin: session.is_admin,
-                isActive: session.is_active
-            };
-
-            next();
-        } catch (error) {
-            console.error('Auth middleware error:', error);
-            res.status(401).json({ error: 'Authentication failed' });
+        if (!sessionToken) {
+            console.log(`[${new Date().toISOString()}] ❌ No token provided`);
+            return res.status(401).json({ error: 'No token provided' });
         }
-    };
+
+        const session = await this.validateSession(sessionToken);
+        if (!session) {
+            console.log(`[${new Date().toISOString()}] ❌ Invalid or expired session for token:`, sessionToken);
+            return res.status(401).json({ error: 'Invalid or expired session' });
+        }
+
+        req.user = {
+            id: session.user_id,
+            telegramId: session.telegram_id,
+            username: session.username,
+            firstName: session.first_name,
+            lastName: session.last_name,
+            isAdmin: session.is_admin,
+            isActive: session.is_active
+        };
+
+        console.log(`[${new Date().toISOString()}] ✅ Auth successful for user:`, req.user.id);
+        next();
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Auth middleware error:`, error.message);
+        res.status(401).json({ error: 'Authentication failed' });
+    }
+};
 
     adminRequired = async (req, res, next) => {
         if (!req.user || !req.user.isAdmin) {
