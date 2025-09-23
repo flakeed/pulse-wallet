@@ -6,8 +6,14 @@ class Database {
     constructor() {
         this.pool = new Pool({
             connectionString: process.env.DATABASE_URL,
+            max: 50,
+            min: 10,
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 10000,
+            acquireTimeoutMillis: 60000,
+            allowExitOnIdle: false,
+            options: '-c default_transaction_isolation=read_committed -c statement_timeout=30000'
         });
-
         this.priceService = null;
 
         this.pool.on('error', (err) => {

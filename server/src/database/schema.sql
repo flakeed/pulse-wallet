@@ -1,6 +1,14 @@
-SET work_mem = '256MB';
-SET maintenance_work_mem = '1GB';
-SET shared_buffers = '512MB';
+SET work_mem = '512MB';
+SET maintenance_work_mem = '2GB';
+SET shared_buffers = '2GB';
+SET effective_cache_size = '8GB';
+SET random_page_cost = 1.1;
+SET seq_page_cost = 1.0;
+SET cpu_tuple_cost = 0.01;
+SET cpu_index_tuple_cost = 0.005;
+SET max_connections = 200;
+SET checkpoint_completion_target = 0.9;
+SET wal_buffers = '64MB';
 SET autocommit = off;
 
 CREATE TABLE IF NOT EXISTS users (
