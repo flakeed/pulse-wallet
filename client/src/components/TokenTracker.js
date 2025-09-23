@@ -28,6 +28,13 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
       return matchesTimeframe && matchesGroup;
     });
 
+    console.log(`[${new Date().toISOString()}] 📊 TokenTracker aggregating:`, {
+      totalTransactions: transactions.length,
+      filteredTransactions: filteredTransactions.length,
+      hours,
+      groupId
+    });
+
     filteredTransactions.forEach((tx) => {
       const tokens = tx.transactionType === 'buy' ? tx.tokensBought : tx.tokensSold;
       if (!tokens || tokens.length === 0) return;
@@ -88,7 +95,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           wallet.tokensBought += tx.transactionType === 'buy' ? token.amount || 0 : 0;
           wallet.tokensSold += tx.transactionType === 'sell' ? token.amount || 0 : 0;
           wallet.pnlSol = wallet.solReceived - wallet.solSpent;
-          
+
           if (txTime > new Date(wallet.lastActivity)) {
             wallet.lastActivity = tx.time;
           }
@@ -111,12 +118,14 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
       wallets: t.wallets.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity))
     }));
 
+    console.log(`[${new Date().toISOString()}] 🎯 TokenTracker result: ${result.length} tokens`);
+
     return result;
   };
 
   const sortTokens = (tokens, sortBy) => {
     const sortedTokens = [...tokens];
-    
+
     switch (sortBy) {
       case 'latest':
         return sortedTokens.sort((a, b) => {
@@ -124,24 +133,24 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           const timeB = new Date(b.summary.latestActivity || 0);
           return timeB - timeA;
         });
-      
+
       case 'profit':
         return sortedTokens.sort((a, b) => b.summary.netSOL - a.summary.netSOL);
-      
- case 'most_wallets':
+
+      case 'most_wallets':
         return sortedTokens.sort((a, b) => b.summary.uniqueWallets - a.summary.uniqueWallets);
 
       case 'loss':
         return sortedTokens.sort((a, b) => a.summary.netSOL - b.summary.netSOL);
-      
+
       case 'volume':
         return sortedTokens.sort((a, b) => Math.abs(b.summary.netSOL) - Math.abs(a.summary.netSOL));
-      
+
       case 'activity':
         return sortedTokens.sort((a, b) => 
           (b.summary.totalBuys + b.summary.totalSells) - (a.summary.totalBuys + a.summary.totalSells)
         );
-      
+
       default:
         return sortedTokens;
     }
@@ -150,26 +159,29 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   useEffect(() => {
     setLoading(true);
     try {
+      console.log(`[${new Date().toISOString()}] 🔄 TokenTracker processing ${transactions.length} transactions`);
+      
       const aggregatedTokens = aggregateTokens(transactions, hours, groupId);
       const sortedTokens = sortTokens(aggregatedTokens, sortBy);
-      
+
       const currentTokenMints = new Set(sortedTokens.map(token => token.mint));
       const newTokens = sortedTokens.filter(token => !previousTokenMints.current.has(token.mint));
-      
+
       if (newTokens.length > 0 && previousTokenMints.current.size > 0) {
         console.log(`🔊 New tokens detected: ${newTokens.length}`);
         newTokens.forEach(token => {
           console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...)`);
         });
-        
+
         soundManager.playNewTokenSound();
       }
-      
+
       previousTokenMints.current = currentTokenMints;
-      
+
       setItems(sortedTokens);
       setError(null);
     } catch (e) {
+      console.error(`[${new Date().toISOString()}] ❌ TokenTracker error:`, e);
       setError(e.message);
     } finally {
       setLoading(false);
@@ -183,7 +195,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   const openGmgnChart = (mintAddress) => {
     if (!mintAddress) return;
     const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(mintAddress)}`;
-    window.location.href = gmgnUrl;
+    window.open(gmgnUrl, '_blank');
   };
 
   return (

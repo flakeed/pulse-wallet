@@ -29,7 +29,7 @@ const solanaGrpcService = new SolanaGrpcService();
 const db = new Database();
 const auth = new AuthMiddleware(db);
 const priceService = new PriceService();
-const sseClients = new Set();
+const sseClients = new Set(); 
 
 const sslOptions = {
   key: fs.readFileSync('/etc/letsencrypt/live/degenlogs.com/privkey.pem'),
@@ -67,27 +67,63 @@ app.use((req, res, next) => {
   next();
 });
 
+const logRedisOperations = () => {
+  const originalPublish = redis.publish.bind(redis);
+
+  redis.publish = async function(channel, message) {
+    console.log(`[${new Date().toISOString()}] 📤 Redis PUBLISH:`, {
+      channel,
+      messagePreview: message.slice(0, 200) + (message.length > 200 ? '...' : ''),
+      subscribers: sseClients.size
+    });
+
+    const result = await originalPublish(channel, message);
+    console.log(`[${new Date().toISOString()}] ✅ Redis PUBLISH result:`, result);
+    return result;
+  };
+};
+
+logRedisOperations();
+
+setInterval(() => {
+  const activeConnections = Array.from(sseClients).filter(client => client.writable && !client.destroyed);
+  console.log(`[${new Date().toISOString()}] 📊 SSE Status:`, {
+    totalClients: sseClients.size,
+    activeConnections: activeConnections.length,
+    grpcStarted: solanaGrpcService.getStatus().isStarted,
+    grpcConnected: solanaGrpcService.getStatus().isConnected,
+    monitoredWallets: solanaGrpcService.getStatus().totalSubscriptions
+  });
+
+  const inactiveClients = Array.from(sseClients).filter(client => !client.writable || client.destroyed);
+  inactiveClients.forEach(client => sseClients.delete(client));
+
+  if (inactiveClients.length > 0) {
+    console.log(`[${new Date().toISOString()}] 🧹 Cleaned up ${inactiveClients.length} inactive SSE connections`);
+  }
+}, 30000); 
+
 app.get('/api/init', auth.authRequired, async (req, res) => {
   try {
     const groupId = req.query.groupId || null;
     const hours = parseInt(req.query.hours) || 24;
     const transactionType = req.query.type;
-    
+
     console.log(`[${new Date().toISOString()}] 🚀 App initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
     const startTime = Date.now();
-    
+
     const [walletCounts, transactions, groups] = await Promise.all([
       db.getWalletCount(groupId),
       db.getRecentTransactionsOptimized(hours, 4000, transactionType, groupId),
       db.getGroups()
     ]);
-    
+
     const grpcStatus = solanaGrpcService.getStatus();
     const performanceStats = solanaGrpcService.getPerformanceStats();
-    
+
     const duration = Date.now() - startTime;
     console.log(`[${new Date().toISOString()}] ⚡ Initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
-    
+
     res.json({
       success: true,
       duration,
@@ -115,7 +151,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'FULL_STREAM',
+          optimizationLevel: 'FULL_STREAM_OPTIMIZED_V3',
           cacheHits: {
             solPrice: performanceStats.solPriceCache.ageMs < 60000,
             processedTransactions: performanceStats.caches.processedTransactions,
@@ -125,13 +161,13 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         }
       }
     });
-    
+
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Error in optimized initialization:`, error);
     res.status(500).json({ 
       error: 'Failed to initialize application data',
       details: error.message,
-      optimization: 'FULL_STREAM'
+      optimization: 'FULL_STREAM_OPTIMIZED_V3'
     });
   }
 });
@@ -139,7 +175,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
 app.get('/api/health', (req, res) => {
   const grpcStatus = solanaGrpcService.getStatus();
   const performanceStats = solanaGrpcService.getPerformanceStats();
-  
+
   res.json({ 
     status: 'ok', 
     message: 'Optimized backend running with Full Stream gRPC',
@@ -174,18 +210,31 @@ app.get('/api/health', (req, res) => {
       },
       isHealthy: performanceStats.isHealthy
     },
-    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING'
+    sse: {
+      totalClients: sseClients.size,
+      activeConnections: Array.from(sseClients).filter(client => client.writable && !client.destroyed).length
+    },
+    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING_V3'
   });
 });
 
 app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) => {
   const performanceStats = solanaGrpcService.getPerformanceStats();
   const grpcStatus = solanaGrpcService.getStatus();
-  
+
   res.json({
     timestamp: new Date().toISOString(),
     grpc: grpcStatus,
     performance: performanceStats,
+    sse: {
+      totalClients: sseClients.size,
+      activeConnections: Array.from(sseClients).filter(client => client.writable && !client.destroyed).length,
+      connectionHealth: Array.from(sseClients).map(client => ({
+        writable: client.writable,
+        destroyed: client.destroyed,
+        readyState: client.readyState
+      }))
+    },
     system: {
       uptime: process.uptime(),
       memory: process.memoryUsage(),
@@ -193,7 +242,7 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
       version: process.version
     },
     optimization: {
-      level: 'FULL_STREAM',
+      level: 'FULL_STREAM_OPTIMIZED_V3',
       features: [
         'Full Solana transaction stream',
         'Client-side wallet filtering',
@@ -202,14 +251,16 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
         'Smart cache management',
         'Real-time filter efficiency monitoring',
         'Automatic cache cleanup',
-        'Single connection resilience'
+        'Single connection resilience',
+        'Enhanced SSE monitoring'
       ],
       advantages: [
         'Scales to millions of wallets',
         'No node subscription limits',
         'Better reliability (1 connection vs many)',
         'Real-time performance monitoring',
-        'Efficient memory usage'
+        'Efficient memory usage',
+        'Improved SSE connection management'
       ],
       metrics: {
         efficiency: `${performanceStats.filterEfficiency}% of transactions filtered out`,
@@ -224,14 +275,14 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
 app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) => {
   try {
     const { force = false } = req.body;
-    
+
     let result;
     if (force) {
       result = solanaGrpcService.forceCleanupCaches();
     } else {
       result = solanaGrpcService.clearCaches();
     }
-    
+
     res.json({
       success: true,
       message: force ? 'Force cache cleanup completed' : 'Manual cache cleanup completed',
@@ -252,7 +303,7 @@ app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) =
 app.get('/api/filter-stats', auth.authRequired, (req, res) => {
   const stats = solanaGrpcService.getPerformanceStats();
   const status = solanaGrpcService.getStatus();
-  
+
   res.json({
     timestamp: new Date().toISOString(),
     filteringPerformance: {
@@ -269,6 +320,10 @@ app.get('/api/filter-stats', auth.authRequired, (req, res) => {
       reconnectAttempts: status.reconnectAttempts,
       activeGroup: status.activeGroupId,
       streamMode: status.mode
+    },
+    sseHealth: {
+      totalClients: sseClients.size,
+      activeConnections: Array.from(sseClients).filter(client => client.writable && !client.destroyed).length
     },
     recommendations: stats.filterEfficiency < 95 ? [
       'Filter efficiency below 95% - consider optimizing wallet data structures',
@@ -290,30 +345,32 @@ app.use(errorHandler);
 
 const gracefulShutdown = async (signal) => {
   console.log(`[${new Date().toISOString()}] 🛑 Received ${signal}, shutting down gracefully...`);
-  
+
   try {
     console.log(`[${new Date().toISOString()}] 🔄 Stopping full stream gRPC service...`);
     await solanaGrpcService.shutdown();
-    
+
     console.log(`[${new Date().toISOString()}] 🔄 Stopping other services...`);
     await Promise.all([
       priceService.close(),
       redis.quit()
     ]);
-    
+
     console.log(`[${new Date().toISOString()}] 🔄 Closing SSE connections...`);
     sseClients.forEach((client) => {
       try {
-        client.end();
+        if (client.writable && !client.destroyed) {
+          client.end();
+        }
       } catch (error) {
         console.warn(`[${new Date().toISOString()}] ⚠️ Error closing SSE client:`, error.message);
       }
     });
     sseClients.clear();
-    
+
     console.log(`[${new Date().toISOString()}] ✅ Graceful shutdown completed`);
     process.exit(0);
-    
+
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Error during shutdown:`, error);
     process.exit(1);
@@ -343,4 +400,5 @@ startSessionCleaner(auth);
 https.createServer(sslOptions, app).listen(port, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] 🚀 Full Stream wallet monitoring server running on https://0.0.0.0:${port}`);
   console.log(`[${new Date().toISOString()}] 📊 Ready to handle unlimited wallets with optimized filtering`);
+  console.log(`[${new Date().toISOString()}] 🔊 SSE monitoring enabled for real-time updates`);
 });

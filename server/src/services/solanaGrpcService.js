@@ -34,8 +34,8 @@ class SolanaGrpcService {
 
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 50; 
-        this.batchTimeout = 5; 
+        this.batchSize = 100; 
+        this.batchTimeout = 10; 
 
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
@@ -62,7 +62,6 @@ class SolanaGrpcService {
     }
 
     setupStatsReporting() {
-
         setInterval(() => {
             const now = Date.now();
             const timeDiff = (now - this.stats.lastStatsUpdate) / 1000;
@@ -163,91 +162,84 @@ class SolanaGrpcService {
         }
     }
 
-async createFullStream() {
-    await this.endStream();
+    async createFullStream() {
+        await this.endStream();
 
-    try {
-        console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
+        try {
+            console.log(`[${new Date().toISOString()}] 🔗 Connecting to full Solana stream...`);
 
-        this.client = new Client(this.grpcEndpoint, undefined, {
-            'grpc.keepalive_time_ms': 30000,
-            'grpc.keepalive_timeout_ms': 5000,
-            'grpc.keepalive_permit_without_calls': true,
-            'grpc.http2.max_pings_without_data': 0,
-            'grpc.http2.min_time_between_pings_ms': 10000,
-            'grpc.http2.min_ping_interval_without_data_ms': 300000,
-            'grpc.max_receive_message_length': 256 * 1024 * 1024,
-            'grpc.max_send_message_length': 256 * 1024 * 1024,
-            'grpc.http2.max_concurrent_streams': 1000,
-            'grpc.keepalive_without_calls': true
-        });
+            this.client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_timeout_ms': 5000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 10000,
+                'grpc.http2.min_ping_interval_without_data_ms': 300000,
+                'grpc.max_receive_message_length': 256 * 1024 * 1024,
+                'grpc.max_send_message_length': 256 * 1024 * 1024,
+                'grpc.http2.max_concurrent_streams': 1000,
+                'grpc.keepalive_without_calls': true
+            });
 
-        this.stream = await this.client.subscribe();
+            this.stream = await this.client.subscribe();
 
-        this.stream.on('data', data => {
-            this.messageCount++;
-            this.stats.totalReceived++;
-            this.handleFullStreamMessage(data);
-        });
+            this.stream.on('data', data => {
+                this.messageCount++;
+                this.stats.totalReceived++;
+                this.handleFullStreamMessage(data);
+            });
 
-        this.stream.on('error', error => {
-            console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
-            this.handleReconnect();
-        });
+            this.stream.on('error', error => {
+                console.error(`[${new Date().toISOString()}] ❌ Full stream error:`, error.message);
+                this.handleReconnect();
+            });
 
-        this.stream.on('end', () => {
-            console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
-            if (this.isStarted) {
-                setTimeout(() => this.handleReconnect(), 2000);
-            }
-        });
-
-        const request = {
-
-            accounts: {},
-            slots: {},
-
-            transactions: {
-
-                [""]: {  
-                    vote: false,           
-                    failed: false,         
-                    accountInclude: [],    
-                    accountExclude: [],    
-                    accountRequired: []    
-                }
-            },
-
-            transactionsStatus: {},
-            entry: {},
-            blocks: {},
-            blocksMeta: {},
-
-            commitment: CommitmentLevel.CONFIRMED,
-
-            accountsDataSlice: []
-        };
-
-        console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
-
-        await new Promise((resolve, reject) => {
-            this.stream.write(request, err => {
-                if (err) {
-                    console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
-                    console.error(`[${new Date().toISOString()}] 🔍 Request structure:`, JSON.stringify(request, null, 2));
-                    reject(err);
-                } else {
-                    console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
-                    resolve();
+            this.stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] 📡 Full stream ended`);
+                if (this.isStarted) {
+                    setTimeout(() => this.handleReconnect(), 2000);
                 }
             });
-        });
 
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
-        throw error;
+            const request = {
+                accounts: {},
+                slots: {},
+                transactions: {
+                    [""]: {  
+                        vote: false,           
+                        failed: false,         
+                        accountInclude: [],    
+                        accountExclude: [],    
+                        accountRequired: []    
+                    }
+                },
+                transactionsStatus: {},
+                entry: {},
+                blocks: {},
+                blocksMeta: {},
+                commitment: CommitmentLevel.CONFIRMED,
+                accountsDataSlice: []
+            };
+
+            console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL Solana transaction stream...`);
+
+            await new Promise((resolve, reject) => {
+                this.stream.write(request, err => {
+                    if (err) {
+                        console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
+                        reject(err);
+                    } else {
+                        console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
+                        resolve();
+                    }
+                });
+            });
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Failed to create full stream:`, error.message);
+            throw error;
+        }
     }
-}
 
     async endStream() {
         try {
@@ -308,12 +300,10 @@ async createFullStream() {
 
     quickFilterTransaction(transactionData) {
         try {
-
             const accountKeys = this.extractAllAccountKeys(transactionData);
 
             for (const accountKey of accountKeys) {
                 if (this.monitoredWallets.has(accountKey)) {
-
                     if (this.activeGroupId) {
                         const walletGroup = this.walletToGroup.get(accountKey);
                         if (walletGroup === this.activeGroupId) {
@@ -384,7 +374,6 @@ async createFullStream() {
                         accountKeys.push(convertedKey);
                     }
                 } catch (conversionError) {
-
                     continue;
                 }
             }
@@ -413,11 +402,32 @@ async createFullStream() {
         );
 
         const results = await Promise.allSettled(promises);
-        const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
+        const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null);
 
-        this.stats.totalProcessed += successful;
+        for (const { value } of successful) {
+            if (value) {
+                try {
+                    const messageStr = JSON.stringify(value);
+                    console.log(`[${new Date().toISOString()}] 📤 Publishing transaction to Redis:`, {
+                        signature: value.signature,
+                        groupId: value.groupId,
+                        channels: value.groupId ? ['transactions', `transactions:group:${value.groupId}`] : ['transactions']
+                    });
 
-        console.log(`[${new Date().toISOString()}] ✅ Batch completed: ${successful}/${batch.size} successful`);
+                    await redis.publish('transactions', messageStr);
+
+                    if (value.groupId) {
+                        await redis.publish(`transactions:group:${value.groupId}`, messageStr);
+                    }
+                } catch (publishError) {
+                    console.error(`[${new Date().toISOString()}] ❌ Error publishing to Redis:`, publishError.message);
+                }
+            }
+        }
+
+        this.stats.totalProcessed += successful.length;
+
+        console.log(`[${new Date().toISOString()}] ✅ Batch completed: ${successful.length}/${batch.size} successful, published to Redis`);
     }
 
     async processTransaction(transactionData) {
@@ -485,7 +495,6 @@ async createFullStream() {
             if (this.monitoredWallets.has(accountKey)) {
                 const walletMetadata = this.walletMetadata.get(accountKey);
                 if (walletMetadata) {
-
                     if (this.activeGroupId && walletMetadata.group_id !== this.activeGroupId) {
                         continue;
                     }
@@ -739,15 +748,7 @@ async createFullStream() {
                     timestamp: new Date(blockTime * 1000).toISOString()
                 };
 
-                const pipeline = redis.pipeline();
-                pipeline.publish('transactions', JSON.stringify(transactionMessage));
-                if (wallet.group_id) {
-                    pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
-                }
-                await pipeline.exec();
-
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType}) for wallet ${wallet.address.slice(0, 8)}...`);
-                return savedTransaction;
+                return transactionMessage; 
             }
 
             return null;
