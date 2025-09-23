@@ -20,9 +20,9 @@ class SolanaGrpcService {
         this.filteredCount = 0;
         this.activeGroupId = null;
 
-        this.monitoredWallets = new Set(); 
-        this.walletToGroup = new Map(); 
-        this.walletMetadata = new Map(); 
+        this.monitoredWallets = new Set();
+        this.walletToGroup = new Map();
+        this.walletMetadata = new Map();
 
         this.processedTransactions = new Set();
         this.recentlyProcessed = new Set();
@@ -34,11 +34,11 @@ class SolanaGrpcService {
 
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 50; 
-        this.batchTimeout = 10; 
+        this.batchSize = 50;
+        this.batchTimeout = 10;
 
-        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
-        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
+        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.001; 
+        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.0001;
 
         this.stats = {
             totalReceived: 0,
@@ -105,12 +105,13 @@ class SolanaGrpcService {
                 }
                 this.lastRecentlyProcessedCleanup = now;
             }
-        }, 300000); 
+        }, 300000);
     }
 
     async loadMonitoredWallets(groupId = null) {
         const startTime = Date.now();
         console.log(`[${new Date().toISOString()}] 📋 Loading monitored wallets${groupId ? ` for group ${groupId}` : ' (all groups)'}`);
+        console.log(`[${new Date().toISOString()}] 🔍 Current monitoredWallets size: ${this.monitoredWallets.size}, activeGroupId: ${this.activeGroupId}`);
 
         try {
             const wallets = await this.db.getActiveWallets(groupId);
@@ -132,6 +133,9 @@ class SolanaGrpcService {
 
             const duration = Date.now() - startTime;
             console.log(`[${new Date().toISOString()}] ✅ Loaded ${this.monitoredWallets.size.toLocaleString()} wallets in ${duration}ms`);
+            if (this.monitoredWallets.size > 0) {
+                console.debug(`[${new Date().toISOString()}] 🔍 Monitored wallets: ${Array.from(this.monitoredWallets).slice(0, 5).join(', ')}${this.monitoredWallets.size > 5 ? '...' : ''}`);
+            }
 
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error loading wallets:`, error.message);
@@ -205,12 +209,12 @@ class SolanaGrpcService {
                 accounts: {},
                 slots: {},
                 transactions: {
-                    [""]: {  
-                        vote: false,           
-                        failed: false,         
-                        accountInclude: [],    
-                        accountExclude: [],    
-                        accountRequired: []    
+                    [""]: {
+                        vote: false,
+                        failed: false,
+                        accountInclude: [],
+                        accountExclude: [],
+                        accountRequired: []
                     }
                 },
                 transactionsStatus: {},
@@ -271,7 +275,7 @@ class SolanaGrpcService {
 
             const filterStart = process.hrtime.bigint();
             const isRelevant = this.quickFilterTransaction(data.transaction);
-            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000; 
+            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000;
 
             if (!isRelevant) {
                 this.stats.totalFiltered++;
@@ -315,7 +319,9 @@ class SolanaGrpcService {
 
             const isRelevant = matchedWallets.length > 0;
             const signature = this.extractSignature(transactionData) || 'unknown';
-            console.debug(`[${new Date().toISOString()}] 🔍 Filtering tx ${signature}: isRelevant=${isRelevant}, matchedWallets=${JSON.stringify(matchedWallets.map(w => ({ address: w.address, group: w.groupId })))}`);
+            if (isRelevant) {
+                console.log(`[${new Date().toISOString()}] ✅ Relevant tx ${signature}: matchedWallets=${JSON.stringify(matchedWallets.map(w => ({ address: w.address, group: w.groupId })))}`);
+            }
 
             return isRelevant;
         } catch (error) {
@@ -632,11 +638,11 @@ class SolanaGrpcService {
 
         console.log(`[${new Date().toISOString()}] ✅ Wallet monitoring updated: ${this.monitoredWallets.size.toLocaleString()} total wallets`);
 
-        return { 
-            successful, 
-            failed: 0, 
-            errors: [], 
-            totalMonitored: this.monitoredWallets.size 
+        return {
+            successful,
+            failed: 0,
+            errors: [],
+            totalMonitored: this.monitoredWallets.size
         };
     }
 
@@ -661,7 +667,7 @@ class SolanaGrpcService {
             isStarted: this.isStarted,
             activeGroupId: this.activeGroupId,
             totalSubscriptions: this.monitoredWallets.size,
-            numStreams: 1, 
+            numStreams: 1,
             messageCount: this.messageCount,
             filteredCount: this.filteredCount,
             reconnectAttempts: this.reconnectAttempts,
@@ -717,9 +723,9 @@ class SolanaGrpcService {
     async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
         try {
             const walletIndex = accountKeys.indexOf(wallet.address);
-            console.debug(`[${new Date().toISOString()}] 🔍 Processing tx ${signature}: wallet=${wallet.address}, groupId=${wallet.group_id}, walletIndex=${walletIndex}`);
+            console.log(`[${new Date().toISOString()}] 🔍 Processing relevant tx ${signature}: wallet=${wallet.address}, groupId=${wallet.group_id}, walletIndex=${walletIndex}`);
             if (walletIndex === -1) {
-                console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: wallet not in accountKeys`);
+                console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: wallet not in accountKeys`);
                 return null;
             }
 
@@ -736,10 +742,10 @@ class SolanaGrpcService {
                 solPrice
             });
 
-            console.debug(`[${new Date().toISOString()}] 🔍 Tx ${signature} analysis: type=${transactionType}, solChange=${solChange}, solAmount=${totalSolAmount}, tokens=${JSON.stringify(tokenChanges.map(t => ({ mint: t.mint, symbol: t.symbol, amount: t.amount })))}`);
+            console.log(`[${new Date().toISOString()}] 🔍 Tx ${signature} analysis: type=${transactionType}, solChange=${solChange}, solAmount=${totalSolAmount}, tokens=${JSON.stringify(tokenChanges.map(t => ({ mint: t.mint, symbol: t.symbol, amount: t.amount })))}`);
 
             if (!transactionType || tokenChanges.length === 0) {
-                console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: no valid type or token changes`);
+                console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: no valid type or token changes`);
                 return null;
             }
 
@@ -771,10 +777,10 @@ class SolanaGrpcService {
                     timestamp: new Date(blockTime * 1000).toISOString()
                 };
 
-                return transactionMessage; 
+                return transactionMessage;
             }
 
-            console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: failed to save to DB`);
+            console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: failed to save to DB`);
             return null;
 
         } catch (error) {
@@ -901,6 +907,8 @@ class SolanaGrpcService {
             usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
         }
 
+        console.log(`[${new Date().toISOString()}] 🔍 Analyzing tx: solChange=${solChange}, usdcChange=${usdcChange}, thresholds=${this.BUY_THRESHOLD}/${this.SELL_THRESHOLD}`);
+
         if (usdcChange < 0) {
             transactionType = 'buy';
             totalSolAmount = Math.abs(usdcChange) / solPrice;
@@ -914,6 +922,7 @@ class SolanaGrpcService {
             transactionType = 'sell';
             totalSolAmount = solChange;
         } else {
+            console.log(`[${new Date().toISOString()}] 🛑 No valid transaction type: solChange=${solChange}, usdcChange=${usdcChange}`);
             return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
         }
 
@@ -969,6 +978,7 @@ class SolanaGrpcService {
 
         const mintChanges = new Map();
         for (const [key, change] of allBalanceChanges) {
+            console.log(`[${new Date().toISOString()}] 🔍 Token change: mint=${change.mint}, owner=${change.owner}, rawChange=${Number(change.postAmount) - Number(change.preAmount)}`);
             if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT) {
                 continue;
             }
@@ -1001,6 +1011,7 @@ class SolanaGrpcService {
         }
 
         if (mintChanges.size === 0) {
+            console.log(`[${new Date().toISOString()}] 🛑 No valid token changes for wallet ${walletAddress}`);
             return [];
         }
 
