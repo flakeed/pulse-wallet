@@ -37,8 +37,8 @@ class SolanaGrpcService {
         this.batchSize = 50;
         this.batchTimeout = 10;
 
-        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.001; 
-        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.0001;
+        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.0001; 
+        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.00001;
 
         this.stats = {
             totalReceived: 0,
@@ -513,6 +513,16 @@ class SolanaGrpcService {
     }
 
     findRelevantWallet(accountKeys) {
+        if (accountKeys.length > 0 && this.monitoredWallets.has(accountKeys[0])) {
+            const walletMetadata = this.walletMetadata.get(accountKeys[0]);
+            if (walletMetadata && (!this.activeGroupId || walletMetadata.group_id === this.activeGroupId)) {
+                return {
+                    address: accountKeys[0],
+                    ...walletMetadata
+                };
+            }
+        }
+
         for (const accountKey of accountKeys) {
             if (this.monitoredWallets.has(accountKey)) {
                 const walletMetadata = this.walletMetadata.get(accountKey);
@@ -723,17 +733,21 @@ class SolanaGrpcService {
     async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
         try {
             const walletIndex = accountKeys.indexOf(wallet.address);
-            console.log(`[${new Date().toISOString()}] 🔍 Processing relevant tx ${signature}: wallet=${wallet.address}, groupId=${wallet.group_id}, walletIndex=${walletIndex}`);
+            console.log(`[${new Date().toISOString()}] 🔍 Processing relevant tx ${signature}: wallet=${wallet.address}, groupId=${wallet.group_id}, walletIndex=${walletIndex}, totalAccounts=${accountKeys.length}`);
+            console.log(`[${new Date().toISOString()}] 🔍 Account keys (first 5): ${accountKeys.slice(0, 5).join(', ')}${accountKeys.length > 5 ? '...' : ''}`);
+
             if (walletIndex === -1) {
-                console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: wallet not in accountKeys`);
+                console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: wallet not in accountKeys (index=-1)`);
                 return null;
             }
 
             const preBalance = meta.preBalances[walletIndex] || 0;
             const postBalance = meta.postBalances[walletIndex] || 0;
             const solChange = (postBalance - preBalance) / 1e9;
+            console.log(`[${new Date().toISOString()}] 🔍 SOL balances: pre=${preBalance / 1e9} SOL, post=${postBalance / 1e9} SOL, change=${solChange} SOL`);
 
             const solPrice = await this.fetchSolPrice();
+            console.log(`[${new Date().toISOString()}] 💰 SOL price: $${solPrice}`);
 
             const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
                 meta,
@@ -742,7 +756,16 @@ class SolanaGrpcService {
                 solPrice
             });
 
-            console.log(`[${new Date().toISOString()}] 🔍 Tx ${signature} analysis: type=${transactionType}, solChange=${solChange}, solAmount=${totalSolAmount}, tokens=${JSON.stringify(tokenChanges.map(t => ({ mint: t.mint, symbol: t.symbol, amount: t.amount })))}`);
+            console.log(`[${new Date().toISOString()}] 🔍 Tx ${signature} analysis: type=${transactionType}, solChange=${solChange}, solAmount=${totalSolAmount}, tokenChanges=${tokenChanges.length}`);
+            if (tokenChanges.length > 0) {
+                console.log(`[${new Date().toISOString()}] 🔍 Tokens: ${JSON.stringify(tokenChanges.map(t => ({ mint: t.mint.slice(0, 8) + '...', symbol: t.symbol, amount: t.amount })))}`);
+            }
+
+            if (!transactionType && tokenChanges.length > 0 && solChange < 0) {
+                console.log(`[${new Date().toISOString()}] 🔄 Fallback: classifying as 'buy' (tokens received, SOL spent)`);
+                transactionType = 'buy';
+                totalSolAmount = Math.abs(solChange);
+            }
 
             if (!transactionType || tokenChanges.length === 0) {
                 console.log(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: no valid type or token changes`);
@@ -812,7 +835,7 @@ class SolanaGrpcService {
                 const transactionResult = await client.query(transactionQuery, [
                     wallet.id,
                     signature,
-                    new Date(blockTime * 1000).toISOString(),
+                    new Date(blockTime * 1000).ISOString(),
                     transactionType,
                     transactionType === 'buy' ? totalSolAmount : 0,
                     transactionType === 'sell' ? totalSolAmount : 0,
@@ -942,6 +965,8 @@ class SolanaGrpcService {
 
         const allBalanceChanges = new Map();
 
+        console.log(`[${new Date().toISOString()}] 🔍 Pre token balances: ${meta.preTokenBalances?.length || 0}, Post: ${meta.postTokenBalances?.length || 0}`);
+
         for (const pre of meta.preTokenBalances || []) {
             const key = `${pre.mint}-${pre.accountIndex}`;
             allBalanceChanges.set(key, {
@@ -978,7 +1003,9 @@ class SolanaGrpcService {
 
         const mintChanges = new Map();
         for (const [key, change] of allBalanceChanges) {
-            console.log(`[${new Date().toISOString()}] 🔍 Token change: mint=${change.mint}, owner=${change.owner}, rawChange=${Number(change.postAmount) - Number(change.preAmount)}`);
+            const rawChange = Number(change.postAmount) - Number(change.preAmount);
+            console.log(`[${new Date().toISOString()}] 🔍 Token change: mint=${change.mint.slice(0, 8)}..., owner=${change.owner.slice(0, 8)}..., rawChange=${rawChange}, wallet=${walletAddress.slice(0, 8)}...`);
+            
             if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT) {
                 continue;
             }
@@ -986,8 +1013,6 @@ class SolanaGrpcService {
             if (change.owner !== walletAddress) {
                 continue;
             }
-
-            const rawChange = Number(change.postAmount) - Number(change.preAmount);
 
             let isValidChange = false;
             if (transactionType === 'buy' && rawChange > 0) {
@@ -1011,7 +1036,7 @@ class SolanaGrpcService {
         }
 
         if (mintChanges.size === 0) {
-            console.log(`[${new Date().toISOString()}] 🛑 No valid token changes for wallet ${walletAddress}`);
+            console.log(`[${new Date().toISOString()}] 🛑 No valid token changes for wallet ${walletAddress.slice(0, 8)}...`);
             return [];
         }
 
