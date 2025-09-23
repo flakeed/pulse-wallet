@@ -29,7 +29,7 @@ const solanaGrpcService = new SolanaGrpcService();
 const db = new Database();
 const auth = new AuthMiddleware(db);
 const priceService = new PriceService();
-const sseClients = new Set();
+const sseClients = new Map(); 
 
 const sslOptions = {
   key: fs.readFileSync('/etc/letsencrypt/live/degenlogs.com/privkey.pem'),
@@ -67,27 +67,52 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get('/api/transactions/stream', auth.authRequired, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const clientId = req.user.id + '-' + Date.now();
+  sseClients.set(clientId, res);
+
+  const groupId = req.query.groupId || null;
+  const redisChannel = groupId ? `transactions:group:${groupId}` : 'transactions';
+
+  const messageHandler = (channel, message) => {
+    res.write(`data: ${message}\n\n`);
+  };
+
+  redis.subscribe(redisChannel, messageHandler);
+
+  req.on('close', () => {
+    redis.unsubscribe(redisChannel, messageHandler);
+    sseClients.delete(clientId);
+    res.end();
+  });
+});
+
 app.get('/api/init', auth.authRequired, async (req, res) => {
   try {
     const groupId = req.query.groupId || null;
     const hours = parseInt(req.query.hours) || 24;
     const transactionType = req.query.type;
-    
+
     console.log(`[${new Date().toISOString()}] 🚀 App initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
     const startTime = Date.now();
-    
+
     const [walletCounts, transactions, groups] = await Promise.all([
       db.getWalletCount(groupId),
       db.getRecentTransactionsOptimized(hours, 4000, transactionType, groupId),
       db.getGroups()
     ]);
-    
+
     const grpcStatus = solanaGrpcService.getStatus();
     const performanceStats = solanaGrpcService.getPerformanceStats();
-    
+
     const duration = Date.now() - startTime;
     console.log(`[${new Date().toISOString()}] ⚡ Initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
-    
+
     res.json({
       success: true,
       duration,
@@ -125,7 +150,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         }
       }
     });
-    
+
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Error in optimized initialization:`, error);
     res.status(500).json({ 
@@ -139,7 +164,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
 app.get('/api/health', (req, res) => {
   const grpcStatus = solanaGrpcService.getStatus();
   const performanceStats = solanaGrpcService.getPerformanceStats();
-  
+
   res.json({ 
     status: 'ok', 
     message: 'Optimized backend running with Full Stream gRPC',
@@ -181,7 +206,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) => {
   const performanceStats = solanaGrpcService.getPerformanceStats();
   const grpcStatus = solanaGrpcService.getStatus();
-  
+
   res.json({
     timestamp: new Date().toISOString(),
     grpc: grpcStatus,
@@ -224,14 +249,14 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
 app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) => {
   try {
     const { force = false } = req.body;
-    
+
     let result;
     if (force) {
       result = solanaGrpcService.forceCleanupCaches();
     } else {
       result = solanaGrpcService.clearCaches();
     }
-    
+
     res.json({
       success: true,
       message: force ? 'Force cache cleanup completed' : 'Manual cache cleanup completed',
@@ -252,7 +277,7 @@ app.post('/api/cache/clear', auth.authRequired, auth.adminRequired, (req, res) =
 app.get('/api/filter-stats', auth.authRequired, (req, res) => {
   const stats = solanaGrpcService.getPerformanceStats();
   const status = solanaGrpcService.getStatus();
-  
+
   res.json({
     timestamp: new Date().toISOString(),
     filteringPerformance: {
@@ -290,17 +315,17 @@ app.use(errorHandler);
 
 const gracefulShutdown = async (signal) => {
   console.log(`[${new Date().toISOString()}] 🛑 Received ${signal}, shutting down gracefully...`);
-  
+
   try {
     console.log(`[${new Date().toISOString()}] 🔄 Stopping full stream gRPC service...`);
     await solanaGrpcService.shutdown();
-    
+
     console.log(`[${new Date().toISOString()}] 🔄 Stopping other services...`);
     await Promise.all([
       priceService.close(),
       redis.quit()
     ]);
-    
+
     console.log(`[${new Date().toISOString()}] 🔄 Closing SSE connections...`);
     sseClients.forEach((client) => {
       try {
@@ -310,10 +335,10 @@ const gracefulShutdown = async (signal) => {
       }
     });
     sseClients.clear();
-    
+
     console.log(`[${new Date().toISOString()}] ✅ Graceful shutdown completed`);
     process.exit(0);
-    
+
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Error during shutdown:`, error);
     process.exit(1);
