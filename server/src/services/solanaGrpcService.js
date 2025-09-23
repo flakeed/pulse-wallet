@@ -133,12 +133,11 @@ class SolanaGrpcService {
         this.isStarted = true;
         this.activeGroupId = groupId;
         try {
-            if (this.allMonitoredWallets.size === 0) {
-                console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets globally`);
-                const allWalletsData = await this.db.getActiveWallets();
-                allWalletsData.forEach(wallet => this.allMonitoredWallets.add(wallet.address));
-                console.log(`[${new Date().toISOString()}] 📊 Loaded ${this.allMonitoredWallets.size} unique wallets globally`);
-            }
+            console.log(`[${new Date().toISOString()}] [INFO] Fetching all active wallets for group ${groupId || 'all'}`);
+            const allWalletsData = await this.db.getActiveWallets(groupId);
+            this.allMonitoredWallets.clear();
+            allWalletsData.forEach(wallet => this.allMonitoredWallets.add(wallet.address));
+            console.log(`[${new Date().toISOString()}] 📊 Loaded ${this.allMonitoredWallets.size} unique wallets for group ${groupId || 'all'}`);
             await this.createAllStreams();
         } catch (error) {
             console.error(`[${new Date().toISOString()}] [ERROR] Failed to start gRPC service: ${error.message}`);
@@ -149,95 +148,81 @@ class SolanaGrpcService {
 
     async createAllStreams() {
         await this.endAllStreams();
-
         this.streams = [];
-        const walletArray = Array.from(this.allMonitoredWallets);
-        const numChunks = Math.ceil(walletArray.length / this.chunkSize);
-        console.log(`[${new Date().toISOString()}] [INFO] Creating ${numChunks} streams with chunk size ${this.chunkSize}`);
-
-        for (let i = 0; i < numChunks; i++) {
-            const start = i * this.chunkSize;
-            const end = Math.min(start + this.chunkSize, walletArray.length);
-            const chunkWallets = new Set(walletArray.slice(start, end));
-            await this.createSingleStream(chunkWallets);
-            if (i < numChunks - 1) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-        }
-        console.log(`[${new Date().toISOString()}] [INFO] All streams created successfully. Total streams: ${this.streams.length}`);
+        console.log(`[${new Date().toISOString()}] [INFO] Creating single stream for all Solana transactions`);
+        await this.createSingleStream();
+        console.log(`[${new Date().toISOString()}] [INFO] Stream created successfully. Total streams: ${this.streams.length}`);
     }
 
-async createSingleStream(chunkWallets) {
-    if (chunkWallets.size === 0) return;
+    async createSingleStream() {
+        try {
+            console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for full Solana transaction stream`);
+            
+            const client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 30000,
+                'grpc.keepalive_timeout_ms': 5000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 10000,
+                'grpc.http2.min_ping_interval_without_data_ms': 300000,
+                'grpc.max_receive_message_length': 128 * 1024 * 1024, 
+                'grpc.max_send_message_length': 128 * 1024 * 1024,  
+                'grpc.http2.max_concurrent_streams': 1000,           
+                'grpc.keepalive_without_calls': true                 
+            });
 
-    try {
-        console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for chunk of ${chunkWallets.size} wallets (stream ${this.streams.length + 1}/${Math.ceil(this.allMonitoredWallets.size / this.chunkSize)})`);
-        
-        const client = new Client(this.grpcEndpoint, undefined, {
-            'grpc.keepalive_time_ms': 30000,
-            'grpc.keepalive_timeout_ms': 5000,
-            'grpc.keepalive_permit_without_calls': true,
-            'grpc.http2.max_pings_without_data': 0,
-            'grpc.http2.min_time_between_pings_ms': 10000,
-            'grpc.http2.min_ping_interval_without_data_ms': 300000,
-            'grpc.max_receive_message_length': 128 * 1024 * 1024, 
-            'grpc.max_send_message_length': 128 * 1024 * 1024,  
-            'grpc.http2.max_concurrent_streams': 1000,           
-            'grpc.keepalive_without_calls': true                 
-        });
+            const stream = await client.subscribe();
+            stream.on('data', data => {
+                this.messageCount++;
+                this.handleGrpcMessageBatched(data);
+            });
+            stream.on('error', error => {
+                console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error: ${error.message}`);
+                this.handleSingleStreamReconnect(stream, client);
+            });
+            stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended`);
+                if (this.isStarted) setTimeout(() => this.handleSingleStreamReconnect(stream, client), 2000);
+            });
 
-        const stream = await client.subscribe();
-        stream.on('data', data => {
-            this.messageCount++;
-            this.handleGrpcMessageBatched(data);
-        });
-        stream.on('error', error => {
-            console.error(`[${new Date().toISOString()}] [ERROR] gRPC stream error for chunk ${chunkWallets.size}: ${error.message}`);
-            this.handleSingleStreamReconnect(stream, client, chunkWallets);
-        });
-        stream.on('end', () => {
-            console.log(`[${new Date().toISOString()}] [INFO] gRPC stream ended for chunk ${chunkWallets.size}`);
-            if (this.isStarted) setTimeout(() => this.handleSingleStreamReconnect(stream, client, chunkWallets), 2000);
-        });
+            const request = {
+                accounts: {},
+                slots: {},
+                transactions: {
+                    client: {
+                        vote: false,
+                        failed: false,
+                        accountInclude: [], 
+                        accountExclude: [],
+                        accountRequired: []
+                    }
+                },
+                transactionsStatus: {},
+                entry: {},
+                blocks: {},
+                blocksMeta: {},
+                commitment: CommitmentLevel.CONFIRMED,
+                accountsDataSlice: []
+            };
 
-        const request = {
-            accounts: {},
-            slots: {},
-            transactions: {
-                client: {
-                    vote: false,
-                    failed: false,
-                    accountInclude: Array.from(chunkWallets),
-                    accountExclude: [],
-                    accountRequired: []
+            console.log(`[${new Date().toISOString()}] [INFO] Sending subscription for full Solana transaction stream`);
+            
+            await new Promise((resolve, reject) => stream.write(request, err => {
+                if (err) {
+                    console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed: ${err.message}`);
+                    reject(err);
+                } else {
+                    console.log(`[${new Date().toISOString()}] [INFO] Subscription sent for full Solana transaction stream`);
+                    resolve();
                 }
-            },
-            transactionsStatus: {},
-            entry: {},
-            blocks: {},
-            blocksMeta: {},
-            commitment: CommitmentLevel.CONFIRMED,
-            accountsDataSlice: []
-        };
+            }));
 
-        console.log(`[${new Date().toISOString()}] [INFO] Sending subscription for chunk of ${chunkWallets.size} wallets (stream ${this.streams.length + 1})`);
-        
-        await new Promise((resolve, reject) => stream.write(request, err => {
-            if (err) {
-                console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed for chunk ${chunkWallets.size}: ${err.message}`);
-                reject(err);
-            } else {
-                console.log(`[${new Date().toISOString()}] [INFO] Subscription sent for chunk of ${chunkWallets.size} wallets`);
-                resolve();
-            }
-        }));
-
-        this.streams.push({ client, stream, chunk: chunkWallets });
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream for chunk ${chunkWallets.size}: ${error.message}`);
-        throw error;
+            this.streams.push({ client, stream });
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] [ERROR] Failed to create stream: ${error.message}`);
+            throw error;
+        }
     }
-}
 
     async endAllStreams() {
         for (const { stream, client } of this.streams) {
@@ -255,15 +240,15 @@ async createSingleStream(chunkWallets) {
         this.streams = [];
     }
 
-    async handleSingleStreamReconnect(stream, client, chunkWallets) {
+    async handleSingleStreamReconnect(stream, client) {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached for chunk ${chunkWallets.size}, stopping service`);
+            console.error(`[${new Date().toISOString()}] [CRITICAL] Max reconnect attempts reached, stopping service`);
             this.isStarted = false;
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC stream for chunk ${chunkWallets.size} (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        console.log(`[${new Date().toISOString()}] [INFO] Reconnecting gRPC stream (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         try {
             if (stream) stream.end();
@@ -284,13 +269,13 @@ async createSingleStream(chunkWallets) {
         await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
 
         try {
-            await this.createSingleStream(chunkWallets);
-            console.log(`[${new Date().toISOString()}] [INFO] Single stream reconnection successful for chunk ${chunkWallets.size}`);
+            await this.createSingleStream();
+            console.log(`[${new Date().toISOString()}] [INFO] Stream reconnection successful`);
             this.reconnectAttempts = 0;
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Single stream reconnect failed for chunk ${chunkWallets.size}: ${error.message}`);
+            console.error(`[${new Date().toISOString()}] [ERROR] Stream reconnect failed: ${error.message}`);
             this.reconnectInterval = Math.min(this.reconnectInterval * 1.5, 30000);
-            await this.handleSingleStreamReconnect(stream, client, chunkWallets);
+            await this.handleSingleStreamReconnect(stream, client);
         }
     }
 
@@ -411,6 +396,17 @@ async createSingleStream(chunkWallets) {
             }
 
             const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+
+            const solPrice = await this.fetchSolPrice();
+            const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+                meta,
+                walletAddress: wallet.address,
+                solPrice
+            });
+
+            if (!transactionType || totalSolAmount <= 0.01 || tokenChanges.length === 0) {
+                return null;
+            }
 
             return await this.processTransactionFromGrpcData({
                 signature,
@@ -891,7 +887,7 @@ async createSingleStream(chunkWallets) {
         }
 
         const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch subscription completed in ${duration}ms: +${successful} wallets, total global: ${this.allMonitoredWallets.size}`);
+        console.log(`[${new Date().toISOString()}] [INFO] Batch subscription completed in ${duration}ms: +${successful} wallets, total: ${this.allMonitoredWallets.size}`);
 
         if (this.isStarted) {
             await this.createAllStreams();
@@ -916,7 +912,7 @@ async createSingleStream(chunkWallets) {
         }
 
         const duration = Date.now() - startTime;
-        console.log(`[${new Date().toISOString()}] [INFO] Batch unsubscription completed in ${duration}ms: -${successful} wallets, total global: ${this.allMonitoredWallets.size}`);
+        console.log(`[${new Date().toISOString()}] [INFO] Batch unsubscription completed in ${duration}ms: -${successful} wallets, total: ${this.allMonitoredWallets.size}`);
 
         if (this.isStarted) {
             await this.createAllStreams();
@@ -1002,8 +998,14 @@ async createSingleStream(chunkWallets) {
 
         try {
             this.activeGroupId = groupId;
+            this.allMonitoredWallets.clear();
+            const allWalletsData = await this.db.getActiveWallets(groupId);
+            allWalletsData.forEach(wallet => this.allMonitoredWallets.add(wallet.address));
+            console.log(`[${new Date().toISOString()}] [INFO] Switched to group ${groupId || 'all'}: loaded ${this.allMonitoredWallets.size} wallets`);
 
-            console.log(`[${new Date().toISOString()}] [INFO] Switched to group ${groupId || 'all'}: filtering ${this.allMonitoredWallets.size} global wallets`);
+            if (this.isStarted) {
+                await this.createAllStreams();
+            }
 
             return {
                 success: true,
@@ -1017,32 +1019,32 @@ async createSingleStream(chunkWallets) {
         }
     }
 
-getStatus() {
-    return {
-        isConnected: this.streams.length > 0 && this.streams.every(s => s.stream !== null),
-        isStarted: this.isStarted,
-        activeGroupId: this.activeGroupId,
-        totalSubscriptions: this.allMonitoredWallets.size,
-        numStreams: this.streams.length,
-        chunkSize: this.chunkSize,
-        averageWalletsPerStream: this.allMonitoredWallets.size / Math.max(1, this.streams.length),
-        messageCount: this.messageCount,
-        reconnectAttempts: this.reconnectAttempts,
-        grpcEndpoint: this.grpcEndpoint,
-        mode: 'optimized_grpc_sharded',
-        performance: {
-            processedTransactions: this.processedTransactions.size,
-            recentlyProcessed: this.recentlyProcessed.size,
-            batchSize: this.batchSize,
-            batchTimeout: this.batchTimeout,
-            solPriceCached: this.solPriceCache.lastUpdated > 0,
-            cacheStats: {
-                solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
-                solPrice: this.solPriceCache.price
+    getStatus() {
+        return {
+            isConnected: this.streams.length > 0 && this.streams.every(s => s.stream !== null),
+            isStarted: this.isStarted,
+            activeGroupId: this.activeGroupId,
+            totalSubscriptions: this.allMonitoredWallets.size,
+            numStreams: this.streams.length,
+            chunkSize: this.chunkSize,
+            averageWalletsPerStream: this.allMonitoredWallets.size / Math.max(1, this.streams.length),
+            messageCount: this.messageCount,
+            reconnectAttempts: this.reconnectAttempts,
+            grpcEndpoint: this.grpcEndpoint,
+            mode: 'optimized_grpc_sharded',
+            performance: {
+                processedTransactions: this.processedTransactions.size,
+                recentlyProcessed: this.recentlyProcessed.size,
+                batchSize: this.batchSize,
+                batchTimeout: this.batchTimeout,
+                solPriceCached: this.solPriceCache.lastUpdated > 0,
+                cacheStats: {
+                    solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
+                    solPrice: this.solPriceCache.price
+                }
             }
-        }
-    };
-}
+        };
+    }
 
     async stop() {
         console.log(`[${new Date().toISOString()}] [INFO] Stopping gRPC service`);
