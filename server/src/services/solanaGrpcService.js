@@ -44,8 +44,8 @@ class SolanaGrpcService {
             this.batchTimer = null;
         }
 
-        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.001; 
-        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.0001; 
+        this.BUY_THRESHOLD = 0; 
+        this.SELL_THRESHOLD = 0; 
         this.MIN_TOKEN_CHANGE = parseFloat(process.env.MIN_TOKEN_CHANGE) || 0; 
 
         this.stats = {
@@ -478,7 +478,7 @@ class SolanaGrpcService {
                 signature
             });
 
-            if (!analysis.transactionType) {
+            if (!analysis.transactionType || analysis.tokenChanges.length === 0 || analysis.totalSolAmount < 0.01) {
                 this.stats.totalSkipped++;
                 return null;
             }
@@ -574,7 +574,7 @@ class SolanaGrpcService {
             }
         }
 
-        if (Math.abs(stablecoinChange) > 0.01) { 
+        if (Math.abs(stablecoinChange) > 0) { 
             if (stablecoinChange < 0) {
                 transactionType = 'buy';
                 totalSolAmount = Math.abs(stablecoinChange) / solPrice;
@@ -582,10 +582,10 @@ class SolanaGrpcService {
                 transactionType = 'sell';
                 totalSolAmount = stablecoinChange / solPrice;
             }
-        } else if (solChange < -this.BUY_THRESHOLD) { 
+        } else if (solChange < 0) { 
             transactionType = 'buy';
             totalSolAmount = Math.abs(solChange);
-        } else if (solChange > this.SELL_THRESHOLD) { 
+        } else if (solChange > 0) { 
             transactionType = 'sell';
             totalSolAmount = solChange;
         } else {
@@ -598,14 +598,14 @@ class SolanaGrpcService {
 
                 if (hasIncrease && !hasDecrease) {
                     transactionType = 'buy';
-                    totalSolAmount = Math.abs(solChange) || 0.001; 
+                    totalSolAmount = Math.abs(solChange); 
                 } else if (hasDecrease && !hasIncrease) {
                     transactionType = 'sell';
-                    totalSolAmount = Math.abs(solChange) || 0.001; 
+                    totalSolAmount = Math.abs(solChange); 
                 } else if (hasIncrease && hasDecrease) {
 
                     transactionType = solChange < 0 ? 'buy' : 'sell';
-                    totalSolAmount = Math.abs(solChange) || 0.001;
+                    totalSolAmount = Math.abs(solChange);
                 }
             }
         }
