@@ -125,13 +125,17 @@ class SolanaGrpcService {
             this.walletMetadata.clear();
 
             for (const wallet of wallets) {
-                this.monitoredWallets.add(wallet.address);
-                this.walletToGroup.set(wallet.address, wallet.group_id);
-                this.walletMetadata.set(wallet.address, {
+                const pubkey = new PublicKey(wallet.address);
+                const keyBuffer = pubkey.toBuffer();
+                const key = keyBuffer.toString('base64');
+                this.monitoredWallets.add(key);
+                this.walletToGroup.set(key, wallet.group_id);
+                this.walletMetadata.set(key, {
                     id: wallet.id,
                     name: wallet.name,
                     group_id: wallet.group_id,
-                    group_name: wallet.group_name
+                    group_name: wallet.group_name,
+                    base58: wallet.address
                 });
             }
 
@@ -250,10 +254,11 @@ class SolanaGrpcService {
         try {
             if (!data.transaction) return;
 
-            const signature = this.extractSignature(data.transaction);
-            if (!signature) return;
+            const sigBuffer = this.extractSignatureBuffer(data.transaction);
+            if (!sigBuffer) return;
 
-            if (this.processedTransactions.has(signature)) {
+            const sigHash = sigBuffer.toString('base64');
+            if (this.processedTransactions.has(sigHash)) {
                 this.stats.totalFiltered++;
                 return;
             }
@@ -268,12 +273,12 @@ class SolanaGrpcService {
                 return;
             }
 
+            const signature = bs58.encode(sigBuffer);
+
             if (this.realtimeMode) {
-
-                this.processTransactionImmediately(data);
+                this.processTransactionImmediately(data, signature, sigHash);
             } else {
-
-                this.transactionBatch.set(signature, data);
+                this.transactionBatch.set(sigHash, data);
                 if (!this.batchTimer) {
                     this.batchTimer = setTimeout(() => {
                         this.processBatch();
@@ -291,9 +296,9 @@ class SolanaGrpcService {
         }
     }
 
-    async processTransactionImmediately(data) {
+    async processTransactionImmediately(data, signature, sigHash) {
         try {
-            const result = await this.processTransaction(data.transaction);
+            const result = await this.processTransaction(data.transaction, signature, sigHash);
             if (result) {
                 this.stats.totalProcessed++;
                 console.log(`[${new Date().toISOString()}] ⚡ Processed ${result.signature} immediately`);
@@ -312,12 +317,14 @@ class SolanaGrpcService {
 
         console.log(`[${new Date().toISOString()}] ⚡ Processing filtered batch: ${batch.size} relevant transactions`);
 
-        const promises = Array.from(batch.entries()).map(([signature, data]) =>
-            this.processTransaction(data.transaction).catch(error => {
+        const promises = Array.from(batch.entries()).map(([sigHash, data]) => {
+            const sigBuffer = this.extractSignatureBuffer(data.transaction);
+            const signature = bs58.encode(sigBuffer);
+            return this.processTransaction(data.transaction, signature, sigHash).catch(error => {
                 console.error(`[${new Date().toISOString()}] ❌ Failed to process ${signature}:`, error.message);
                 return null;
-            })
-        );
+            });
+        });
 
         const results = await Promise.allSettled(promises);
         const successful = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
@@ -401,20 +408,20 @@ class SolanaGrpcService {
                     let convertedKey;
 
                     if (key.type === 'Buffer' && Array.isArray(key.data)) {
-                        convertedKey = new PublicKey(Buffer.from(key.data)).toString();
+                        convertedKey = Buffer.from(key.data).toString('base64');
                     } else if (Buffer.isBuffer(key)) {
-                        convertedKey = new PublicKey(key).toString();
+                        convertedKey = key.toString('base64');
                     } else if (typeof key === 'string') {
-                        convertedKey = key;
+                        convertedKey = new PublicKey(key).toBuffer().toString('base64');
                     } else if (key && typeof key === 'object') {
                         const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) :
                             key.pubkey || key.key || key.address;
-                        convertedKey = pubkeyBuffer ? new PublicKey(pubkeyBuffer).toString() : key.toString();
+                        convertedKey = pubkeyBuffer ? Buffer.from(pubkeyBuffer).toString('base64') : null;
                     } else {
-                        convertedKey = new PublicKey(Buffer.from(key)).toString();
+                        convertedKey = Buffer.from(key).toString('base64');
                     }
 
-                    if (convertedKey && convertedKey.length === 44) {
+                    if (convertedKey) {
                         accountKeys.push(convertedKey);
                     }
                 } catch (conversionError) {
@@ -429,7 +436,38 @@ class SolanaGrpcService {
         return accountKeys;
     }
 
-    async processTransaction(transactionData) {
+    extractSignatureBuffer(transactionData) {
+        try {
+            const sigObj = transactionData.signature ||
+                (transactionData.signatures && transactionData.signatures[0]) ||
+                transactionData.transaction?.signature ||
+                (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
+                transactionData.tx?.signature ||
+                (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+
+            if (!sigObj) {
+                return null;
+            }
+
+            let sigBuffer;
+            if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
+                sigBuffer = Buffer.from(sigObj.data);
+            } else if (Buffer.isBuffer(sigObj)) {
+                sigBuffer = sigObj;
+            } else if (typeof sigObj === 'string') {
+                sigBuffer = bs58.decode(sigObj);
+            } else {
+                sigBuffer = Buffer.from(sigObj);
+            }
+
+            return sigBuffer;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error extracting signature buffer:`, error.message);
+            return null;
+        }
+    }
+
+    async processTransaction(transactionData, signature, sigHash) {
         try {
             let transaction = null, meta = null;
 
@@ -448,16 +486,12 @@ class SolanaGrpcService {
                 return null;
             }
 
-            const signature = this.extractSignature(transactionData) || transactionData.signature;
-            if (!signature) return null;
-
-            const processedKey = `${signature}`;
-            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
+            if (this.processedTransactions.has(sigHash) || this.recentlyProcessed.has(sigHash)) {
                 return null;
             }
 
-            this.processedTransactions.add(signature);
-            this.recentlyProcessed.add(processedKey);
+            this.processedTransactions.add(sigHash);
+            this.recentlyProcessed.add(sigHash);
 
             const existingTx = await this.db.pool.query(
                 'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
@@ -498,8 +532,11 @@ class SolanaGrpcService {
                         continue;
                     }
                     return {
-                        address: accountKey,
-                        ...walletMetadata
+                        address: walletMetadata.base58,
+                        id: walletMetadata.id,
+                        name: walletMetadata.name,
+                        group_id: walletMetadata.group_id,
+                        group_name: walletMetadata.group_name
                     };
                 }
             }
@@ -640,7 +677,8 @@ class SolanaGrpcService {
 
     async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
         try {
-            const walletIndex = accountKeys.indexOf(wallet.address);
+            const walletBase64 = new PublicKey(wallet.address).toBuffer().toString('base64');
+            const walletIndex = accountKeys.indexOf(walletBase64);
             if (walletIndex === -1) return null;
 
             const preBalance = meta.preBalances[walletIndex] || 0;
@@ -1052,41 +1090,6 @@ class SolanaGrpcService {
         }
 
         return tokenInfos;
-    }
-
-    extractSignature(transactionData) {
-        try {
-            const sigObj = transactionData.signature ||
-                (transactionData.signatures && transactionData.signatures[0]) ||
-                transactionData.transaction?.signature ||
-                (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
-                transactionData.tx?.signature ||
-                (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
-
-            if (!sigObj) {
-                return null;
-            }
-
-            let signature;
-            if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
-                signature = bs58.encode(Buffer.from(sigObj.data));
-            } else if (Buffer.isBuffer(sigObj)) {
-                signature = bs58.encode(sigObj);
-            } else if (typeof sigObj === 'string') {
-                signature = sigObj;
-            } else {
-                signature = bs58.encode(Buffer.from(sigObj));
-            }
-
-            if (signature.length < 80 || signature.length > 88) {
-                return null;
-            }
-
-            return signature;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error extracting signature:`, error.message);
-            return null;
-        }
     }
 
     getStatus() {
