@@ -12,7 +12,6 @@ class Database {
             connectionTimeoutMillis: 10000,
             acquireTimeoutMillis: 60000,
             allowExitOnIdle: false,
-            options: '-c default_transaction_isolation=read_committed -c statement_timeout=30000'
         });
         this.priceService = null;
 
