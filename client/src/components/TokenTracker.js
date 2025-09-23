@@ -10,6 +10,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState('latest');
   const previousTokenMints = useRef(new Set());
+  const eventSourceRef = useRef(null);
 
   const aggregateTokens = (transactions, hours, groupId) => {
     const EXCLUDED_TOKENS = [
@@ -88,7 +89,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           wallet.tokensBought += tx.transactionType === 'buy' ? token.amount || 0 : 0;
           wallet.tokensSold += tx.transactionType === 'sell' ? token.amount || 0 : 0;
           wallet.pnlSol = wallet.solReceived - wallet.solSpent;
-          
+
           if (txTime > new Date(wallet.lastActivity)) {
             wallet.lastActivity = tx.time;
           }
@@ -116,7 +117,7 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
 
   const sortTokens = (tokens, sortBy) => {
     const sortedTokens = [...tokens];
-    
+
     switch (sortBy) {
       case 'latest':
         return sortedTokens.sort((a, b) => {
@@ -124,24 +125,24 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
           const timeB = new Date(b.summary.latestActivity || 0);
           return timeB - timeA;
         });
-      
+
       case 'profit':
         return sortedTokens.sort((a, b) => b.summary.netSOL - a.summary.netSOL);
-      
- case 'most_wallets':
+
+      case 'most_wallets':
         return sortedTokens.sort((a, b) => b.summary.uniqueWallets - a.summary.uniqueWallets);
 
       case 'loss':
         return sortedTokens.sort((a, b) => a.summary.netSOL - b.summary.netSOL);
-      
+
       case 'volume':
         return sortedTokens.sort((a, b) => Math.abs(b.summary.netSOL) - Math.abs(a.summary.netSOL));
-      
+
       case 'activity':
         return sortedTokens.sort((a, b) => 
           (b.summary.totalBuys + b.summary.totalSells) - (a.summary.totalBuys + a.summary.totalSells)
         );
-      
+
       default:
         return sortedTokens;
     }
@@ -152,21 +153,21 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     try {
       const aggregatedTokens = aggregateTokens(transactions, hours, groupId);
       const sortedTokens = sortTokens(aggregatedTokens, sortBy);
-      
+
       const currentTokenMints = new Set(sortedTokens.map(token => token.mint));
       const newTokens = sortedTokens.filter(token => !previousTokenMints.current.has(token.mint));
-      
+
       if (newTokens.length > 0 && previousTokenMints.current.size > 0) {
         console.log(`🔊 New tokens detected: ${newTokens.length}`);
         newTokens.forEach(token => {
           console.log(`  - ${token.symbol} (${token.mint.slice(0, 8)}...)`);
         });
-        
+
         soundManager.playNewTokenSound();
       }
-      
+
       previousTokenMints.current = currentTokenMints;
-      
+
       setItems(sortedTokens);
       setError(null);
     } catch (e) {
@@ -180,7 +181,59 @@ function TokenTracker({ groupId, transactions, timeframe, onTimeframeChange, gro
     setHours(timeframe);
   }, [timeframe]);
 
-  const openGmgnChart = (mintAddress) => {
+  useEffect(() => {
+    const eventSource = new EventSource(`/api/transactions/stream?groupId=${groupId || ''}`);
+    eventSourceRef.current = eventSource;
+
+    eventSource.onmessage = (event) => {
+      try {
+        const newTransaction = JSON.parse(event.data);
+        setItems((prevItems) => {
+          const newItems = [...prevItems];
+          const aggregatedTokens = aggregateTokens([newTransaction], hours, groupId);
+          aggregatedTokens.forEach((newToken) => {
+            const existingIndex = newItems.findIndex(item => item.mint === newToken.mint);
+            if (existingIndex >= 0) {
+              newItems[existingIndex] = {
+                ...newItems[existingIndex],
+                wallets: [...newItems[existingIndex].wallets, ...newToken.wallets],
+                summary: {
+                  ...newItems[existingIndex].summary,
+                  uniqueWallets: new Set([...newItems[existingIndex].summary.uniqueWallets, ...newToken.summary.uniqueWallets]),
+                  totalBuys: newItems[existingIndex].summary.totalBuys + newToken.summary.totalBuys,
+                  totalSells: newItems[existingIndex].summary.totalSells + newToken.summary.totalSells,
+                  totalSpentSOL: newItems[existingIndex].summary.totalSpentSOL + newToken.summary.totalSpentSOL,
+                  totalReceivedSOL: newItems[existingIndex].summary.totalReceivedSOL + newToken.summary.totalReceivedSOL,
+                  netSOL: +(newItems[existingIndex].summary.totalReceivedSOL + newToken.summary.totalReceivedSOL - 
+                            newItems[existingIndex].summary.totalSpentSOL - newToken.summary.totalSpentSOL).toFixed(6),
+                  latestActivity: newToken.summary.latestActivity > newItems[existingIndex].summary.latestActivity 
+                    ? newToken.summary.latestActivity 
+                    : newItems[existingIndex].summary.latestActivity
+                }
+              };
+            } else {
+              newItems.unshift(newToken);
+              soundManager.playNewTokenSound();
+            }
+          });
+          return sortTokens(newItems, sortBy);
+        });
+      } catch (e) {
+        console.error('Error processing SSE transaction:', e);
+      }
+    };
+
+    eventSource.onerror = () => {
+      console.error('SSE connection error');
+      eventSource.close();
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [groupId, hours, sortBy]);
+
+   const openGmgnChart = (mintAddress) => {
     if (!mintAddress) return;
     const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(mintAddress)}`;
     window.location.href = gmgnUrl;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import WalletManager from './components/WalletManager';
 import MonitoringStatus from './components/MonitoringStatus';
@@ -16,7 +16,6 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  
   const [walletCount, setWalletCount] = useState(0);
   const [transactions, setTransactions] = useState([]);
   const [monitoringStatus, setMonitoringStatus] = useState({ isMonitoring: false });
@@ -29,6 +28,13 @@ function App() {
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupInfo, setSelectedGroupInfo] = useState(null);
 
+  const reconnectAttempts = useRef(0);
+  const maxReconnectAttempts = 5;
+  const reconnectDelay = useRef(1000); 
+  const maxReconnectDelay = 30000; 
+  const heartbeatTimeout = useRef(null);
+  const HEARTBEAT_INTERVAL = 30000; 
+
   useEffect(() => {
     checkAuthentication();
   }, []);
@@ -36,19 +42,19 @@ function App() {
   const checkAuthentication = async () => {
     const sessionToken = localStorage.getItem('sessionToken');
     const savedUser = localStorage.getItem('user');
-  
+
     if (!sessionToken || !savedUser) {
       setIsCheckingAuth(false);
       return;
     }
-  
+
     try {
       const response = await fetch(`${API_BASE}/auth/validate`, {
         headers: {
-          'Authorization': `Bearer ${sessionToken}`
-        }
+          'Authorization': `Bearer ${sessionToken}`,
+        },
       });
-  
+
       if (response.ok) {
         const userData = JSON.parse(savedUser);
         setUser(userData);
@@ -58,7 +64,7 @@ function App() {
         localStorage.removeItem('user');
       }
     } catch (error) {
-      console.error('Session check error:', error);
+      console.error(`[${new Date().toISOString()}] ❌ Session check error:`, error);
       localStorage.removeItem('sessionToken');
       localStorage.removeItem('user');
     } finally {
@@ -79,30 +85,29 @@ function App() {
     setUser(null);
     setIsAuthenticated(false);
     setShowAdminPanel(false);
+    setTransactions([]);
+    setError(null);
   };
 
   const getAuthHeaders = () => {
     const sessionToken = localStorage.getItem('sessionToken');
     return {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${sessionToken}`
+      'Authorization': `Bearer ${sessionToken}`,
     };
   };
 
   const fastInit = async (hours = timeframe, type = transactionType, groupId = selectedGroup) => {
     try {
       setError(null);
-      
       const startTime = Date.now();
 
       const headers = getAuthHeaders();
-      
       const initUrl = `${API_BASE}/init?hours=${hours}${type !== 'all' ? `&type=${type}` : ''}${groupId ? `&groupId=${groupId}` : ''}`;
-      
-      
-      const response = await fetch(initUrl, { 
+
+      const response = await fetch(initUrl, {
         headers,
-        timeout: 30000
+        signal: AbortSignal.timeout(30000),
       });
 
       if (!response.ok) {
@@ -110,46 +115,23 @@ function App() {
       }
 
       const result = await response.json();
-      
+
       if (!result.success || !result.data) {
         throw new Error('Invalid response format from server');
       }
 
       const { data } = result;
-      
-      if (data.transactions) {
-        setTransactions(data.transactions);
-      } else {
-        console.warn('[App] No transactions data received');
-        setTransactions([]);
-      }
-      
-      if (data.monitoring) {
-        setMonitoringStatus(data.monitoring);
-      } else {
-        console.warn('[App] No monitoring data received');
-        setMonitoringStatus({ isMonitoring: false });
-      }
-      
-      if (data.groups) {
-        setGroups(data.groups);
-      } else {
-        console.warn('[App] No groups data received');
-        setGroups([]);
-      }
-      
-      if (data.wallets && typeof data.wallets.totalCount === 'number') {
-        setWalletCount(data.wallets.totalCount);
-      } else {
-        console.warn('[App] No wallet count received');
-        setWalletCount(0);
-      }
-      
+
+      setTransactions(data.transactions || []);
+      setMonitoringStatus(data.monitoring || { isMonitoring: false });
+      setGroups(data.groups || []);
+      setWalletCount(data.wallets?.totalCount || 0);
+
       if (groupId && data.wallets?.selectedGroup) {
         const groupInfo = {
           groupId: data.wallets.selectedGroup.groupId,
           walletCount: data.wallets.selectedGroup.walletCount || 0,
-          groupName: data.groups?.find(g => g.id === groupId)?.name || 'Unknown Group'
+          groupName: data.groups?.find((g) => g.id === groupId)?.name || 'Unknown Group',
         };
         setSelectedGroupInfo(groupInfo);
       } else {
@@ -157,11 +139,10 @@ function App() {
       }
 
       const duration = Date.now() - startTime;
-
+      console.log(`[${new Date().toISOString()}] ✅ Initialization completed in ${duration}ms`);
     } catch (err) {
-      console.error('[App] Error in init:', err);
+      console.error(`[${new Date().toISOString()}] ❌ Error in init:`, err);
       setError(`Failed to load application data: ${err.message}`);
-      
       setTransactions([]);
       setMonitoringStatus({ isMonitoring: false });
       setGroups([]);
@@ -174,7 +155,6 @@ function App() {
 
   const removeAllWallets = async (groupId = null) => {
     try {
-      
       const url = groupId ? `${API_BASE}/wallets?groupId=${groupId}` : `${API_BASE}/wallets`;
       const response = await fetch(url, {
         method: 'DELETE',
@@ -187,68 +167,51 @@ function App() {
       }
 
       const data = await response.json();
-      
-      
+
       if (data.newCounts) {
         setWalletCount(data.newCounts.totalWallets || 0);
-        
         if (groupId && data.newCounts.selectedGroup) {
           setSelectedGroupInfo({
             groupId: data.newCounts.selectedGroup.groupId,
             walletCount: data.newCounts.selectedGroup.walletCount || 0,
-            groupName: selectedGroupInfo?.groupName || 'Unknown Group'
+            groupName: selectedGroupInfo?.groupName || 'Unknown Group',
           });
         } else if (groupId && !data.newCounts.selectedGroup) {
           setSelectedGroupInfo({
-            groupId: groupId,
+            groupId,
             walletCount: 0,
-            groupName: selectedGroupInfo?.groupName || 'Unknown Group'
+            groupName: selectedGroupInfo?.groupName || 'Unknown Group',
           });
-        } else if (!groupId) {
+        } else {
           setSelectedGroupInfo(null);
         }
       } else {
         if (groupId && selectedGroupInfo) {
           setSelectedGroupInfo({
             ...selectedGroupInfo,
-            walletCount: 0
+            walletCount: 0,
           });
         } else {
           setWalletCount(0);
           setSelectedGroupInfo(null);
         }
       }
-      
+
       setTransactions([]);
-      
       setRefreshKey((prev) => prev + 1);
-      
+
       return {
         success: true,
         message: data.message || `Successfully removed all wallets${groupId ? ' from selected group' : ''}`,
-        newCounts: data.newCounts
+        newCounts: data.newCounts,
       };
-      
     } catch (err) {
-      console.error(`[App] Error in removeAllWallets:`, err);
+      console.error(`[${new Date().toISOString()}] ❌ Error in removeAllWallets:`, err);
       throw new Error(err.message || 'Failed to remove all wallets');
     }
   };
 
-  useEffect(() => {
-    const handleUnhandledRejection = (event) => {
-      console.error('[App] Unhandled promise rejection:', event.reason);
-      setError(`Unexpected error: ${event.reason?.message || 'Unknown error'}`);
-    };
-  
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    
-    return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-    };
-  }, []);
-
-  useEffect(() => {
+  const setupSSE = () => {
     if (!isAuthenticated) return;
 
     const sessionToken = localStorage.getItem('sessionToken');
@@ -262,14 +225,33 @@ function App() {
 
     const eventSource = new EventSource(sseUrl.toString());
 
+    reconnectAttempts.current = 0;
+    reconnectDelay.current = 1000;
+
+    eventSource.addEventListener('ping', () => {
+      console.log(`[${new Date().toISOString()}] 📡 SSE heartbeat received`);
+      clearTimeout(heartbeatTimeout.current);
+      heartbeatTimeout.current = setTimeout(() => {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Heartbeat timeout, attempting reconnect`);
+        handleSSEError(eventSource, 'Heartbeat timeout');
+      }, HEARTBEAT_INTERVAL * 2);
+    });
+
     eventSource.onopen = () => {
+      console.log(`[${new Date().toISOString()}] ✅ SSE connection established`);
       setError(null);
+      reconnectAttempts.current = 0;
+      reconnectDelay.current = 1000;
+      clearTimeout(heartbeatTimeout.current);
+      heartbeatTimeout.current = setTimeout(() => {
+        console.warn(`[${new Date().toISOString()}] ⚠️ No initial heartbeat, attempting reconnect`);
+        handleSSEError(eventSource, 'No initial heartbeat');
+      }, HEARTBEAT_INTERVAL * 2);
     };
 
     eventSource.onmessage = (event) => {
       try {
         const newTransaction = JSON.parse(event.data);
-
         const now = new Date();
         const txTime = new Date(newTransaction.timestamp);
         const hoursDiff = (now - txTime) / (1000 * 60 * 60);
@@ -301,59 +283,85 @@ function App() {
           });
         }
       } catch (err) {
-        console.error('Error parsing SSE message:', err);
+        console.error(`[${new Date().toISOString()}] ❌ Error parsing SSE message:`, err);
       }
     };
 
     eventSource.onerror = (error) => {
-      console.error('SSE connection error:', error);
-      
-      if (eventSource.readyState === EventSource.CLOSED) {
-        setError('Real-time connection lost. Please refresh the page.');
-      }
-      
-      eventSource.close();
-      
-      setTimeout(() => {
-        setRefreshKey(prev => prev + 1);
-      }, 5000);
+      console.error(`[${new Date().toISOString()}] ❌ SSE connection error:`, error);
+      handleSSEError(eventSource, 'Connection error');
     };
 
     return () => {
+      clearTimeout(heartbeatTimeout.current);
       eventSource.close();
+      console.log(`[${new Date().toISOString()}] 🔌 SSE connection closed`);
     };
+  };
+
+  const handleSSEError = async (eventSource, errorReason) => {
+    eventSource.close();
+    clearTimeout(heartbeatTimeout.current);
+
+    if (reconnectAttempts.current >= maxReconnectAttempts) {
+      setError('Real-time connection lost. Please try reconnecting or refresh the page.');
+      return;
+    }
+
+    try {
+      const sessionToken = localStorage.getItem('sessionToken');
+      const response = await fetch(`${API_BASE}/auth/validate`, {
+        headers: {
+          'Authorization': `Bearer ${sessionToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        console.error(`[${new Date().toISOString()}] ❌ Session token invalid, logging out`);
+        handleLogout();
+        return;
+      }
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] ❌ Session validation error:`, err);
+      handleLogout();
+      return;
+    }
+
+    reconnectAttempts.current += 1;
+    console.warn(`[${new Date().toISOString()}] 🔄 Attempting SSE reconnect (${reconnectAttempts.current}/${maxReconnectAttempts}) in ${reconnectDelay.current}ms`);
+
+    setTimeout(() => {
+      setRefreshKey((prev) => prev + 1);
+      reconnectDelay.current = Math.min(reconnectDelay.current * 2, maxReconnectDelay);
+    }, reconnectDelay.current);
+  };
+
+  useEffect(() => {
+    const cleanup = setupSSE();
+    return cleanup;
   }, [timeframe, transactionType, selectedGroup, isAuthenticated, refreshKey]);
 
   const handleTimeframeChange = (newTimeframe) => {
-    
     setTimeframe(newTimeframe);
     setLoading(true);
     setError(null);
-    
     setTransactions([]);
-    
     fastInit(newTimeframe, transactionType, selectedGroup);
   };
 
   const handleTransactionTypeChange = (newType) => {
-    
     setTransactionType(newType);
     setLoading(true);
     setError(null);
-    
     setTransactions([]);
-    
     fastInit(timeframe, newType, selectedGroup);
   };
 
   const handleGroupChange = async (groupId) => {
     const selectedGroupId = groupId || null;
-    
-    
     setSelectedGroup(selectedGroupId);
     setLoading(true);
     setError(null);
-    
     setTransactions([]);
     setSelectedGroupInfo(null);
 
@@ -363,15 +371,14 @@ function App() {
         headers: getAuthHeaders(),
         body: JSON.stringify({ groupId: selectedGroupId }),
       });
-      
+
       if (!response.ok) {
         throw new Error(`Failed to switch group: HTTP ${response.status}`);
       }
-      
+
       fastInit(timeframe, transactionType, selectedGroupId);
-      
     } catch (error) {
-      console.error('Error switching group:', error);
+      console.error(`[${new Date().toISOString()}] ❌ Error switching group:`, error);
       setError(`Failed to switch group: ${error.message}`);
       setLoading(false);
     }
@@ -379,14 +386,13 @@ function App() {
 
   const handleAddWalletsBulk = async (wallets, groupId, progressCallback) => {
     const startTime = Date.now();
-    
     try {
       if (progressCallback) {
         progressCallback({
           current: 0,
           total: wallets.length,
           batch: 1,
-          phase: 'validating'
+          phase: 'validating',
         });
       }
 
@@ -401,18 +407,17 @@ function App() {
         successful: 0,
         failed: 0,
         errors: [],
-        successfulWallets: []
+        successfulWallets: [],
       };
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        
         if (progressCallback) {
           progressCallback({
             current: i * CHUNK_SIZE,
             total: wallets.length,
             batch: i + 1,
-            phase: 'uploading'
+            phase: 'uploading',
           });
         }
 
@@ -423,8 +428,8 @@ function App() {
             body: JSON.stringify({
               wallets: chunk,
               groupId,
-              optimized: true
-            })
+              optimized: true,
+            }),
           });
 
           if (!response.ok) {
@@ -432,49 +437,49 @@ function App() {
           }
 
           const result = await response.json();
-
           if (!result.success && !result.results) {
             throw new Error(result.error || 'Unknown server error');
           }
 
           totalResults.successful += result.results.successful || 0;
           totalResults.failed += result.results.failed || 0;
-
           if (result.results.errors) {
             totalResults.errors.push(...result.results.errors);
           }
-
           if (result.results.successfulWallets) {
             totalResults.successfulWallets.push(...result.results.successfulWallets);
           }
 
           if (result.results.newCounts && result.results.successful > 0) {
             setWalletCount(result.results.newCounts.totalWallets);
-            
             if (selectedGroupInfo && (!groupId || groupId === selectedGroupInfo.groupId)) {
-              const newGroupCount = result.results.newCounts.groupCounts?.find(gc => gc.groupId === selectedGroupInfo.groupId)?.count;
+              const newGroupCount = result.results.newCounts.groupCounts?.find(
+                (gc) => gc.groupId === selectedGroupInfo.groupId
+              )?.count;
               if (newGroupCount !== undefined) {
-                setSelectedGroupInfo(prev => prev ? {
-                  ...prev,
-                  walletCount: newGroupCount
-                } : null);
+                setSelectedGroupInfo((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        walletCount: newGroupCount,
+                      }
+                    : null
+                );
               }
             }
           }
-
         } catch (chunkError) {
-          console.error(`Chunk ${i + 1} failed:`, chunkError.message);
-          
+          console.error(`[${new Date().toISOString()}] ❌ Chunk ${i + 1} failed:`, chunkError.message);
           totalResults.failed += chunk.length;
           totalResults.errors.push({
             address: `chunk_${i + 1}`,
             error: `Entire chunk failed: ${chunkError.message}`,
-            walletCount: chunk.length
+            walletCount: chunk.length,
           });
         }
 
         if (i < chunks.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
       }
 
@@ -483,7 +488,7 @@ function App() {
           current: wallets.length,
           total: wallets.length,
           batch: chunks.length,
-          phase: 'completed'
+          phase: 'completed',
         });
       }
 
@@ -494,11 +499,10 @@ function App() {
       return {
         success: totalResults.successful > 0,
         message: `Import: ${totalResults.successful} successful, ${totalResults.failed} failed (${successRate}% success rate)`,
-        results: totalResults
+        results: totalResults,
       };
-
     } catch (error) {
-      console.error('Bulk import failed:', error);
+      console.error(`[${new Date().toISOString()}] ❌ Bulk import failed:`, error);
       throw new Error(`Bulk import failed: ${error.message}`);
     }
   };
@@ -512,7 +516,6 @@ function App() {
       });
 
       const data = await response.json();
-
       if (!response.ok) {
         throw new Error(data.error || 'Failed to create group');
       }
@@ -533,7 +536,6 @@ function App() {
       });
 
       const data = await response.json();
-
       if (!response.ok) {
         throw new Error(data.error || 'Failed to toggle monitoring');
       }
@@ -542,6 +544,11 @@ function App() {
     } catch (err) {
       setError(err.message);
     }
+  };
+
+  const handleReconnect = () => {
+    setError(null);
+    setRefreshKey((prev) => prev + 1);
   };
 
   useEffect(() => {
@@ -579,25 +586,35 @@ function App() {
   return (
     <div className="h-screen bg-gray-900 flex flex-col overflow-hidden">
       <Header user={user} onLogout={handleLogout} onOpenAdmin={() => setShowAdminPanel(true)} />
-      
-      {error && <ErrorMessage error={error} />}
-      
+      {error && (
+        <ErrorMessage
+          error={error}
+          action={
+            error.includes('Real-time connection lost') ? (
+              <button
+                onClick={handleReconnect}
+                className="mt-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+              >
+                Reconnect
+              </button>
+            ) : null
+          }
+        />
+      )}
       <MonitoringStatus status={monitoringStatus} onToggle={toggleMonitoring} />
-      
-      <WalletManager 
-        onAddWalletsBulk={handleAddWalletsBulk} 
-        onCreateGroup={createGroup} 
+      <WalletManager
+        onAddWalletsBulk={handleAddWalletsBulk}
+        onCreateGroup={createGroup}
         onRemoveAllWallets={removeAllWallets}
-        groups={groups} 
+        groups={groups}
         selectedGroup={selectedGroup}
         selectedGroupInfo={selectedGroupInfo}
         walletCount={walletCount}
       />
-      
       <div className="flex-1 overflow-hidden">
-        <TokenTracker 
-          groupId={selectedGroup} 
-          transactions={transactions} 
+        <TokenTracker
+          groupId={selectedGroup}
+          transactions={transactions}
           timeframe={timeframe}
           onTimeframeChange={handleTimeframeChange}
           groups={groups}
@@ -607,7 +624,6 @@ function App() {
           selectedGroupInfo={selectedGroupInfo}
         />
       </div>
-
       {showAdminPanel && user?.isAdmin && (
         <AdminPanel user={user} onClose={() => setShowAdminPanel(false)} />
       )}
