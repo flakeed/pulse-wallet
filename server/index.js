@@ -115,7 +115,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'FULL_STREAM_OPTIMIZED_V3',
+          optimizationLevel: 'FULL_STREAM',
           cacheHits: {
             solPrice: performanceStats.solPriceCache.ageMs < 60000,
             processedTransactions: performanceStats.caches.processedTransactions,
@@ -131,7 +131,7 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     res.status(500).json({ 
       error: 'Failed to initialize application data',
       details: error.message,
-      optimization: 'FULL_STREAM_OPTIMIZED_V3'
+      optimization: 'FULL_STREAM'
     });
   }
 });
@@ -174,7 +174,7 @@ app.get('/api/health', (req, res) => {
       },
       isHealthy: performanceStats.isHealthy
     },
-    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING_V3'
+    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING'
   });
 });
 
@@ -193,7 +193,7 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
       version: process.version
     },
     optimization: {
-      level: 'FULL_STREAM_OPTIMIZED_V3',
+      level: 'FULL_STREAM',
       features: [
         'Full Solana transaction stream',
         'Client-side wallet filtering',
