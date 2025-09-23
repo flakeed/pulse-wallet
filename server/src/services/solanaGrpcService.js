@@ -3,6 +3,7 @@ const Database = require('../database/connection');
 const { PublicKey } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const { redis } = require('./tokenService');
+const { batchFetchTokenMetadata } = require('./tokenService');
 
 class SolanaGrpcService {
     constructor() {
@@ -11,8 +12,12 @@ class SolanaGrpcService {
         this.stream = null;
         this.db = new Database();
         this.isStarted = false;
+        this.isConnecting = false;
+        this.reconnectInterval = 2000; 
+        this.maxReconnectAttempts = 10;
         this.reconnectAttempts = 0;
         this.messageCount = 0;
+        this.filteredCount = 0;
         this.activeGroupId = null;
 
         this.monitoredWallets = new Set();
@@ -20,468 +25,92 @@ class SolanaGrpcService {
         this.walletMetadata = new Map();
 
         this.processedTransactions = new Set();
-        this.recentSignatures = new Set();
-
-        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.001; 
-        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001; 
-
-        this.transactionQueue = [];
-        this.processingTimer = null;
-        this.BATCH_SIZE = 50; 
-        this.BATCH_TIMEOUT = 10; 
-
-        this.solPrice = 150;
-        this.solPriceLastUpdate = 0;
-
-        this.stats = {
-            received: 0,
-            filtered: 0,
-            processed: 0,
-            errors: 0
+        this.recentlyProcessed = new Set();
+        this.solPriceCache = {
+            price: 220,
+            lastUpdated: 0,
+            cacheTimeout: 30000 
         };
 
-        setInterval(() => this.cleanupCaches(), 300000);
+        this.transactionBatch = new Map();
+        this.batchTimer = null;
+        this.batchSize = 50; 
+        this.batchTimeout = 10; 
 
-        console.log(`[${new Date().toISOString()}] 🚀 Real-Time Service initialized`);
+        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
+        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
+
+        this.stats = {
+            totalReceived: 0,
+            totalFiltered: 0,
+            totalProcessed: 0,
+            filterEfficiency: 0,
+            avgFilterTime: 0,
+            lastStatsUpdate: Date.now()
+        };
+
+        this.PROCESSED_CLEANUP_INTERVAL = 12 * 60 * 60 * 1000; 
+        this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 30 * 60 * 1000; 
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
+
+        this.setupCacheCleanup();
+        this.setupStatsReporting();
+
+        console.log(`[${new Date().toISOString()}] 🚀 Real-Time Stream Service initialized`);
+        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
     }
 
-    async start(groupId = null) {
-        if (this.isStarted && this.activeGroupId === groupId) {
-            console.log(`[${new Date().toISOString()}] ℹ️ Service already running for group ${groupId || 'all'}`);
-            return;
-        }
+    setupStatsReporting() {
+        setInterval(() => {
+            const now = Date.now();
+            const timeDiff = (now - this.stats.lastStatsUpdate) / 1000;
 
-        console.log(`[${new Date().toISOString()}] 🚀 Starting REAL-TIME stream for group ${groupId || 'all'}`);
-
-        this.isStarted = true;
-        this.activeGroupId = groupId;
-
-        try {
-            await this.loadMonitoredWallets(groupId);
-            await this.updateSolPrice();
-            await this.createStream();
-
-            console.log(`[${new Date().toISOString()}] ✅ REAL-TIME service started - monitoring ${this.monitoredWallets.size} wallets`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Failed to start:`, error.message);
-            this.isStarted = false;
-            throw error;
-        }
-    }
-
-    async createStream() {
-        await this.endStream();
-
-        try {
-            this.client = new Client(this.grpcEndpoint, undefined, {
-                'grpc.keepalive_time_ms': 30000,
-                'grpc.keepalive_timeout_ms': 5000,
-                'grpc.max_receive_message_length': 64 * 1024 * 1024, 
-                'grpc.max_send_message_length': 16 * 1024 * 1024,
-            });
-
-            this.stream = await this.client.subscribe();
-
-            this.stream.on('data', this.handleStreamData.bind(this));
-            this.stream.on('error', this.handleError.bind(this));
-            this.stream.on('end', this.handleReconnect.bind(this));
-
-            const request = {
-                transactions: {
-                    "": {
-                        vote: false,
-                        failed: false,
-                        accountInclude: [],
-                        accountExclude: [],
-                        accountRequired: []
-                    }
-                },
-                commitment: CommitmentLevel.CONFIRMED,
-                accounts: {},
-                slots: {},
-                transactionsStatus: {},
-                entry: {},
-                blocks: {},
-                blocksMeta: {},
-                accountsDataSlice: []
-            };
-
-            console.log(`[${new Date().toISOString()}] 📡 Subscribing to FULL transaction stream...`);
-
-            await new Promise((resolve, reject) => {
-                this.stream.write(request, err => {
-                    if (err) reject(err);
-                    else {
-                        console.log(`[${new Date().toISOString()}] ✅ REAL-TIME stream active`);
-                        resolve();
-                    }
-                });
-            });
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Stream creation failed:`, error.message);
-            throw error;
-        }
-    }
-
-    handleStreamData(data) {
-        this.stats.received++;
-
-        if (!data.transaction) return;
-
-        const signature = this.extractSignatureFast(data.transaction);
-        if (!signature) return;
-
-        if (this.processedTransactions.has(signature)) {
-            this.stats.filtered++;
-            return;
-        }
-
-        if (!this.quickWalletFilter(data.transaction)) {
-            this.stats.filtered++;
-            return;
-        }
-
-        this.transactionQueue.push({
-            signature,
-            data: data.transaction,
-            timestamp: Date.now()
-        });
-
-        if (this.transactionQueue.length >= this.BATCH_SIZE) {
-            this.processBatchImmediately();
-        } else if (!this.processingTimer) {
-
-            this.processingTimer = setTimeout(() => {
-                this.processBatchImmediately();
-            }, this.BATCH_TIMEOUT);
-        }
-    }
-
-    extractSignatureFast(transactionData) {
-        try {
-            const sigObj = transactionData.signature || 
-                          (transactionData.signatures && transactionData.signatures[0]);
-
-            if (!sigObj) return null;
-
-            if (typeof sigObj === 'string') return sigObj;
-
-            if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
-                return bs58.encode(Buffer.from(sigObj.data));
+            if (this.stats.totalReceived > 0) {
+                this.stats.filterEfficiency = ((this.stats.totalFiltered / this.stats.totalReceived) * 100).toFixed(2);
             }
 
-            return bs58.encode(Buffer.from(sigObj));
-        } catch {
-            return null;
-        }
+            console.log(`[${new Date().toISOString()}] 📊 Performance Stats:`);
+            console.log(`  📥 Total received: ${this.stats.totalReceived} tx (${(this.stats.totalReceived / timeDiff).toFixed(1)} tx/s)`);
+            console.log(`  🎯 Filtered out: ${this.stats.totalFiltered} (${this.stats.filterEfficiency}%)`);
+            console.log(`  ✅ Processed: ${this.stats.totalProcessed}`);
+            console.log(`  👥 Monitored wallets: ${this.monitoredWallets.size.toLocaleString()}`);
+            console.log(`  🔄 Active group: ${this.activeGroupId || 'all'}`);
+
+            this.stats.totalReceived = 0;
+            this.stats.totalFiltered = 0;
+            this.stats.totalProcessed = 0;
+            this.stats.lastStatsUpdate = now;
+        }, 15000); 
     }
 
-    quickWalletFilter(transactionData) {
-        try {
-            const accountKeys = this.extractAccountKeysFast(transactionData);
+    setupCacheCleanup() {
+        setInterval(() => {
+            const now = Date.now();
 
-            for (const key of accountKeys) {
-                if (this.monitoredWallets.has(key)) {
-
-                    if (this.activeGroupId) {
-                        const walletGroup = this.walletToGroup.get(key);
-                        return walletGroup === this.activeGroupId;
-                    }
-                    return true;
+            if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
+                if (this.processedTransactions.size > 50000) { 
+                    const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
+                    toDelete.forEach(sig => this.processedTransactions.delete(sig));
+                    console.log(`[${new Date().toISOString()}] 🧹 Daily cleanup: removed ${toDelete.length} processed transactions`);
                 }
+                this.lastProcessedCleanup = now;
             }
-            return false;
-        } catch {
-            return false;
-        }
-    }
 
-    extractAccountKeysFast(transactionData) {
-        const keys = [];
-
-        try {
-            const accountKeys = transactionData.transaction?.message?.accountKeys || 
-                              transactionData.message?.accountKeys || 
-                              [];
-
-            for (const key of accountKeys) {
-                try {
-                    if (typeof key === 'string') {
-                        keys.push(key);
-                    } else if (key.pubkey) {
-                        keys.push(new PublicKey(key.pubkey).toString());
-                    } else {
-                        keys.push(new PublicKey(key).toString());
-                    }
-                } catch {
-                    continue;
+            if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
+                if (this.recentlyProcessed.size > 5000) { 
+                    const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
+                    toDelete.forEach(key => this.recentlyProcessed.delete(key));
+                    console.log(`[${new Date().toISOString()}] 🧹 Hourly cleanup: removed ${toDelete.length} recent entries`);
                 }
+                this.lastRecentlyProcessedCleanup = now;
             }
-        } catch {
-
-        }
-
-        return keys;
-    }
-
-    async processBatchImmediately() {
-        if (this.processingTimer) {
-            clearTimeout(this.processingTimer);
-            this.processingTimer = null;
-        }
-
-        if (this.transactionQueue.length === 0) return;
-
-        const batch = this.transactionQueue.splice(0, this.BATCH_SIZE);
-
-        setImmediate(async () => {
-            try {
-                const promises = batch.map(item => this.processTransactionFast(item));
-                const results = await Promise.allSettled(promises);
-
-                const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
-                this.stats.processed += successful;
-
-                if (successful > 0) {
-                    console.log(`[${new Date().toISOString()}] ⚡ Processed ${successful}/${batch.length} transactions in real-time`);
-                }
-            } catch (error) {
-                console.error(`[${new Date().toISOString()}] ❌ Batch processing error:`, error.message);
-                this.stats.errors++;
-            }
-        });
-
-        if (this.transactionQueue.length > 0) {
-            this.processBatchImmediately();
-        }
-    }
-
-    async processTransactionFast(item) {
-        try {
-            const { signature, data } = item;
-
-            this.processedTransactions.add(signature);
-
-            const relevantWallet = this.findRelevantWalletFast(data);
-            if (!relevantWallet) return null;
-
-            const analysis = await this.analyzeTransactionFast(data, relevantWallet);
-            if (!analysis) return null;
-
-            const savedTx = await this.saveTransactionFast(signature, analysis, relevantWallet);
-            if (!savedTx) return null;
-
-            const message = {
-                signature,
-                walletAddress: relevantWallet.address,
-                walletName: relevantWallet.name,
-                groupId: relevantWallet.group_id,
-                groupName: relevantWallet.group_name,
-                transactionType: analysis.type,
-                solAmount: analysis.solAmount,
-                tokens: analysis.tokens,
-                timestamp: new Date().toISOString()
-            };
-
-            const pipeline = redis.pipeline();
-            pipeline.publish('transactions', JSON.stringify(message));
-            if (relevantWallet.group_id) {
-                pipeline.publish(`transactions:group:${relevantWallet.group_id}`, JSON.stringify(message));
-            }
-            await pipeline.exec();
-
-            return true;
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Fast processing error:`, error.message);
-            return null;
-        }
-    }
-
-    findRelevantWalletFast(transactionData) {
-        const accountKeys = this.extractAccountKeysFast(transactionData);
-
-        for (const key of accountKeys) {
-            const metadata = this.walletMetadata.get(key);
-            if (metadata) {
-                if (this.activeGroupId && metadata.group_id !== this.activeGroupId) {
-                    continue;
-                }
-                return {
-                    address: key,
-                    ...metadata
-                };
-            }
-        }
-        return null;
-    }
-
-    async analyzeTransactionFast(transactionData, wallet) {
-        try {
-            const meta = transactionData.meta;
-            if (!meta || meta.err) return null;
-
-            const walletIndex = this.findWalletIndex(transactionData, wallet.address);
-            if (walletIndex === -1) return null;
-
-            const solChange = this.calculateSolChange(meta, walletIndex);
-            const tokenChanges = this.analyzeTokenChangesFast(meta, wallet.address);
-
-            if (tokenChanges.length === 0) return null;
-
-            let type, solAmount;
-
-            if (solChange < -this.BUY_THRESHOLD) {
-                type = 'buy';
-                solAmount = Math.abs(solChange);
-            } else if (solChange > this.SELL_THRESHOLD) {
-                type = 'sell';
-                solAmount = solChange;
-            } else {
-                return null;
-            }
-
-            return {
-                type,
-                solAmount,
-                tokens: tokenChanges.map(tc => ({
-                    mint: tc.mint,
-                    symbol: tc.symbol,
-                    name: tc.name,
-                    amount: tc.amount
-                }))
-            };
-
-        } catch (error) {
-            return null;
-        }
-    }
-
-    findWalletIndex(transactionData, walletAddress) {
-        try {
-            const accountKeys = transactionData.transaction?.message?.accountKeys || [];
-            return accountKeys.findIndex(key => {
-                if (typeof key === 'string') return key === walletAddress;
-                if (key.pubkey) return new PublicKey(key.pubkey).toString() === walletAddress;
-                return new PublicKey(key).toString() === walletAddress;
-            });
-        } catch {
-            return -1;
-        }
-    }
-
-    calculateSolChange(meta, walletIndex) {
-        const preBalance = meta.preBalances?.[walletIndex] || 0;
-        const postBalance = meta.postBalances?.[walletIndex] || 0;
-        return (postBalance - preBalance) / 1e9;
-    }
-
-    analyzeTokenChangesFast(meta, walletAddress) {
-        const changes = [];
-        const EXCLUDED_MINTS = new Set([
-            'So11111111111111111111111111111111111111112', 
-            'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' 
-        ]);
-
-        try {
-            const preTokens = new Map();
-            const postTokens = new Map();
-
-            for (const pre of meta.preTokenBalances || []) {
-                if (pre.owner === walletAddress && !EXCLUDED_MINTS.has(pre.mint)) {
-                    preTokens.set(pre.mint, {
-                        amount: pre.uiTokenAmount.amount,
-                        decimals: pre.uiTokenAmount.decimals
-                    });
-                }
-            }
-
-            for (const post of meta.postTokenBalances || []) {
-                if (post.owner === walletAddress && !EXCLUDED_MINTS.has(post.mint)) {
-                    postTokens.set(post.mint, {
-                        amount: post.uiTokenAmount.amount,
-                        decimals: post.uiTokenAmount.decimals
-                    });
-                }
-            }
-
-            const allMints = new Set([...preTokens.keys(), ...postTokens.keys()]);
-
-            for (const mint of allMints) {
-                const pre = preTokens.get(mint) || { amount: '0', decimals: 6 };
-                const post = postTokens.get(mint) || { amount: '0', decimals: 6 };
-
-                const change = Number(post.amount) - Number(pre.amount);
-
-                if (Math.abs(change) > 0) {
-                    changes.push({
-                        mint,
-                        amount: Math.abs(change) / Math.pow(10, post.decimals),
-                        symbol: mint.slice(0, 4).toUpperCase(),
-                        name: `Token ${mint.slice(0, 8)}...`,
-                        decimals: post.decimals
-                    });
-                }
-            }
-        } catch (error) {
-
-        }
-
-        return changes;
-    }
-
-    async saveTransactionFast(signature, analysis, wallet) {
-        try {
-
-            const existing = await this.db.pool.query(
-                'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
-                [signature]
-            );
-            if (existing.rows.length > 0) return null;
-
-            return await this.db.withTransaction(async (client) => {
-
-                const txResult = await client.query(`
-                    INSERT INTO transactions (wallet_id, signature, block_time, transaction_type, sol_spent, sol_received)
-                    VALUES ($1, $2, NOW(), $3, $4, $5)
-                    RETURNING id
-                `, [
-                    wallet.id,
-                    signature,
-                    analysis.type,
-                    analysis.type === 'buy' ? analysis.solAmount : 0,
-                    analysis.type === 'sell' ? analysis.solAmount : 0
-                ]);
-
-                const txId = txResult.rows[0].id;
-
-                for (const token of analysis.tokens) {
-                    await client.query(`
-                        INSERT INTO tokens (mint, symbol, name, decimals) 
-                        VALUES ($1, $2, $3, $4) 
-                        ON CONFLICT (mint) DO UPDATE SET updated_at = NOW()
-                        RETURNING id
-                    `, [token.mint, token.symbol, token.name, token.decimals]);
-
-                    await client.query(`
-                        INSERT INTO token_operations (transaction_id, token_id, amount, operation_type) 
-                        SELECT $1, t.id, $3, $4 FROM tokens t WHERE t.mint = $2
-                    `, [txId, token.mint, token.amount, analysis.type]);
-                }
-
-                return { id: txId };
-            });
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Save error:`, error.message);
-            return null;
-        }
+        }, 150000); 
     }
 
     async loadMonitoredWallets(groupId = null) {
         const startTime = Date.now();
-        console.log(`[${new Date().toISOString()}] 📋 Loading wallets for real-time monitoring...`);
+        console.log(`[${new Date().toISOString()}] 📋 Loading monitored wallets${groupId ? ` for group ${groupId}` : ' (all groups)'}`);
 
         try {
             const wallets = await this.db.getActiveWallets(groupId);
@@ -501,7 +130,8 @@ class SolanaGrpcService {
                 });
             }
 
-            console.log(`[${new Date().toISOString()}] ✅ Loaded ${this.monitoredWallets.size} wallets in ${Date.now() - startTime}ms`);
+            const duration = Date.now() - startTime;
+            console.log(`[${new Date().toISOString()}] ✅ Loaded ${this.monitoredWallets.size.toLocaleString()} wallets in ${duration}ms`);
 
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error loading wallets:`, error.message);
@@ -509,61 +139,105 @@ class SolanaGrpcService {
         }
     }
 
-    async updateSolPrice() {
-        try {
-            if (Date.now() - this.solPriceLastUpdate < 60000) return;
+    async start(groupId = null) {
+        if (this.isStarted && this.activeGroupId === groupId) {
+            console.log(`[${new Date().toISOString()}] ℹ️ Real-time stream service already running for group ${groupId || 'all'}`);
+            return;
+        }
 
-            const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
-                timeout: 3000
+        console.log(`[${new Date().toISOString()}] 🚀 Starting real-time Solana stream for group ${groupId || 'all'}`);
+
+        this.isStarted = true;
+        this.activeGroupId = groupId;
+
+        try {
+            await this.loadMonitoredWallets(groupId);
+            await this.createFullStream();
+
+            console.log(`[${new Date().toISOString()}] ✅ Real-time stream service started successfully`);
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Failed to start real-time stream service:`, error.message);
+            this.isStarted = false;
+            throw error;
+        }
+    }
+
+    async createFullStream() {
+        await this.endStream();
+
+        try {
+            console.log(`[${new Date().toISOString()}] 🔗 Connecting to real-time Solana stream...`);
+
+            this.client = new Client(this.grpcEndpoint, undefined, {
+                'grpc.keepalive_time_ms': 15000, 
+                'grpc.keepalive_timeout_ms': 3000,
+                'grpc.keepalive_permit_without_calls': true,
+                'grpc.http2.max_pings_without_data': 0,
+                'grpc.http2.min_time_between_pings_ms': 5000,
+                'grpc.http2.min_ping_interval_without_data_ms': 150000,
+                'grpc.max_receive_message_length': 128 * 1024 * 1024, 
+                'grpc.max_send_message_length': 128 * 1024 * 1024,
+                'grpc.http2.max_concurrent_streams': 500, 
+                'grpc.keepalive_without_calls': true
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                if (data.pairs?.[0]?.priceUsd) {
-                    this.solPrice = parseFloat(data.pairs[0].priceUsd);
-                    this.solPriceLastUpdate = Date.now();
+            this.stream = await this.client.subscribe();
+
+            this.stream.on('data', data => {
+                this.messageCount++;
+                this.stats.totalReceived++;
+                this.handleFullStreamMessage(data);
+            });
+
+            this.stream.on('error', error => {
+                console.error(`[${new Date().toISOString()}] ❌ Stream error:`, error.message);
+                this.handleReconnect();
+            });
+
+            this.stream.on('end', () => {
+                console.log(`[${new Date().toISOString()}] 📡 Stream ended`);
+                if (this.isStarted) {
+                    setTimeout(() => this.handleReconnect(), 1000); 
                 }
-            }
+            });
+
+            const request = {
+                accounts: {},
+                slots: {},
+                transactions: {
+                    [""]: {
+                        vote: false,
+                        failed: false,
+                        accountInclude: [],
+                        accountExclude: [],
+                        accountRequired: []
+                    }
+                },
+                transactionsStatus: {},
+                entry: {},
+                blocks: {},
+                blocksMeta: {},
+                commitment: CommitmentLevel.CONFIRMED,
+                accountsDataSlice: []
+            };
+
+            console.log(`[${new Date().toISOString()}] 📡 Subscribing to real-time Solana transaction stream...`);
+
+            await new Promise((resolve, reject) => {
+                this.stream.write(request, err => {
+                    if (err) {
+                        console.error(`[${new Date().toISOString()}] ❌ Stream subscription failed:`, err.message);
+                        reject(err);
+                    } else {
+                        console.log(`[${new Date().toISOString()}] ✅ Real-time Solana stream subscription active`);
+                        resolve();
+                    }
+                });
+            });
+
         } catch (error) {
-
-        }
-    }
-
-    cleanupCaches() {
-
-        if (this.processedTransactions.size > 50000) {
-            const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
-            toDelete.forEach(sig => this.processedTransactions.delete(sig));
-        }
-
-        if (this.recentSignatures.size > 10000) {
-            this.recentSignatures.clear();
-        }
-
-        console.log(`[${new Date().toISOString()}] 🧹 Cache cleanup: ${this.processedTransactions.size} signatures`);
-    }
-
-    handleError(error) {
-        console.error(`[${new Date().toISOString()}] ❌ Stream error:`, error.message);
-        this.handleReconnect();
-    }
-
-    async handleReconnect() {
-        if (!this.isStarted) return;
-
-        this.reconnectAttempts++;
-        console.log(`[${new Date().toISOString()}] 🔄 Reconnecting (${this.reconnectAttempts})...`);
-
-        await this.endStream();
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        try {
-            await this.createStream();
-            this.reconnectAttempts = 0;
-            console.log(`[${new Date().toISOString()}] ✅ Reconnected successfully`);
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Reconnect failed:`, error.message);
-            setTimeout(() => this.handleReconnect(), 5000);
+            console.error(`[${new Date().toISOString()}] ❌ Failed to create stream:`, error.message);
+            throw error;
         }
     }
 
@@ -575,6 +249,7 @@ class SolanaGrpcService {
             }
             if (this.client) {
                 if (typeof this.client.close === 'function') this.client.close();
+                else if (typeof this.client.destroy === 'function') this.client.destroy();
                 this.client = null;
             }
         } catch (error) {
@@ -582,21 +257,453 @@ class SolanaGrpcService {
         }
     }
 
-    async switchGroup(groupId) {
-        this.activeGroupId = groupId;
-        await this.loadMonitoredWallets(groupId);
-        console.log(`[${new Date().toISOString()}] ✅ Switched to group ${groupId || 'all'}`);
-        return { success: true, activeGroupId: this.activeGroupId };
+    handleFullStreamMessage(data) {
+        try {
+            if (!data.transaction) return;
+
+            const signature = this.extractSignature(data.transaction);
+            if (!signature) return;
+
+            if (this.processedTransactions.has(signature)) {
+                this.stats.totalFiltered++;
+                return;
+            }
+
+            const filterStart = process.hrtime.bigint();
+            const isRelevant = this.quickFilterTransaction(data.transaction);
+            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000;
+
+            if (!isRelevant) {
+                this.stats.totalFiltered++;
+                this.stats.avgFilterTime = (this.stats.avgFilterTime + filterTime) / 2;
+                return;
+            }
+
+            this.transactionBatch.set(signature, data);
+
+            if (!this.batchTimer) {
+                this.batchTimer = setTimeout(() => {
+                    this.processBatch();
+                }, this.batchTimeout);
+            }
+
+            if (this.transactionBatch.size >= this.batchSize) {
+                clearTimeout(this.batchTimer);
+                this.batchTimer = null;
+                this.processBatch();
+            }
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error handling stream message:`, error.message);
+        }
     }
 
-    async subscribeToWalletsBatch(walletAddresses) {
+    quickFilterTransaction(transactionData) {
+        try {
+            const accountKeys = this.extractAllAccountKeys(transactionData);
+            return accountKeys.some(key => this.monitoredWallets.has(key) && 
+                (!this.activeGroupId || this.walletToGroup.get(key) === this.activeGroupId));
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error in quick filter:`, error.message);
+            return false;
+        }
+    }
+
+    extractAllAccountKeys(transactionData) {
+        const accountKeys = [];
+
+        try {
+            let transaction = transactionData.transaction?.transaction || transactionData.transaction || transactionData;
+            let meta = transactionData.transaction?.meta || transactionData.meta || transactionData;
+
+            if (!transaction) return accountKeys;
+
+            let mainAccountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
+
+            if (meta) {
+                if (meta.loadedWritableAddresses) {
+                    mainAccountKeys = mainAccountKeys.concat(meta.loadedWritableAddresses);
+                }
+                if (meta.loadedReadonlyAddresses) {
+                    mainAccountKeys = mainAccountKeys.concat(meta.loadedReadonlyAddresses);
+                }
+            }
+
+            for (const key of mainAccountKeys) {
+                try {
+                    let convertedKey;
+                    if (key.type === 'Buffer' && Array.isArray(key.data)) {
+                        convertedKey = new PublicKey(Buffer.from(key.data)).toString();
+                    } else if (Buffer.isBuffer(key)) {
+                        convertedKey = new PublicKey(key).toString();
+                    } else if (typeof key === 'string') {
+                        convertedKey = key;
+                    } else if (key && typeof key === 'object') {
+                        const pubkeyBuffer = key.pubkey?.type === 'Buffer' ? Buffer.from(key.pubkey.data) :
+                            key.pubkey || key.key || key.address;
+                        convertedKey = pubkeyBuffer ? new PublicKey(pubkeyBuffer).toString() : key.toString();
+                    } else {
+                        convertedKey = new PublicKey(Buffer.from(key)).toString();
+                    }
+
+                    if (convertedKey && convertedKey.length === 44) {
+                        accountKeys.push(convertedKey);
+                    }
+                } catch (conversionError) {
+                    continue;
+                }
+            }
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error extracting account keys:`, error.message);
+        }
+
+        return accountKeys;
+    }
+
+    async processBatch() {
+        if (this.transactionBatch.size === 0) return;
+
+        const batch = new Map(this.transactionBatch);
+        this.transactionBatch.clear();
+        this.batchTimer = null;
+
+        console.log(`[${new Date().toISOString()}] ⚡ Processing batch: ${batch.size} transactions`);
+
+        const transactionsToInsert = [];
+        const tokenOperations = [];
+
+        for (const [signature, data] of batch) {
+            const result = await this.processTransaction(data.transaction).catch(error => {
+                console.error(`[${new Date().toISOString()}] ❌ Failed to process ${signature}:`, error.message);
+                return null;
+            });
+            if (result) {
+                transactionsToInsert.push(result.transaction);
+                tokenOperations.push(...result.tokenOperations);
+            }
+        }
+
+        if (transactionsToInsert.length > 0) {
+            await this.bulkSaveToDb(transactionsToInsert, tokenOperations);
+        }
+
+        this.stats.totalProcessed += transactionsToInsert.length;
+        console.log(`[${new Date().toISOString()}] ✅ Batch completed: ${transactionsToInsert.length}/${batch.size} successful`);
+    }
+
+    async processTransaction(transactionData) {
+        try {
+            let transaction = transactionData.transaction?.transaction || transactionData.transaction || transactionData;
+            let meta = transactionData.transaction?.meta || transactionData.meta || transactionData;
+
+            if (!transaction || !meta || meta.err) {
+                return null;
+            }
+
+            const signature = this.extractSignature(transactionData) || transactionData.signature;
+            if (!signature) return null;
+
+            const processedKey = `${signature}`;
+            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
+                return null;
+            }
+
+            this.processedTransactions.add(signature);
+            this.recentlyProcessed.add(processedKey);
+
+            const accountKeys = this.extractAllAccountKeys(transactionData);
+            const relevantWallet = this.findRelevantWallet(accountKeys);
+
+            if (!relevantWallet) return null;
+
+            const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+
+            const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+                meta,
+                solChange: 0, 
+                walletAddress: relevantWallet.address,
+                solPrice: await this.fetchSolPrice()
+            });
+
+            if (!transactionType || tokenChanges.length === 0) {
+                return null;
+            }
+
+            const transactionMessage = {
+                signature,
+                walletAddress: relevantWallet.address,
+                walletName: relevantWallet.name,
+                groupId: relevantWallet.group_id,
+                groupName: relevantWallet.group_name,
+                transactionType,
+                solAmount: totalSolAmount,
+                tokens: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    amount: tc.amount,
+                    symbol: tc.symbol,
+                    name: tc.name
+                })),
+                timestamp: new Date(blockTime * 1000).toISOString()
+            };
+
+            const pipeline = redis.pipeline();
+            pipeline.publish('transactions', JSON.stringify(transactionMessage));
+            if (relevantWallet.group_id) {
+                pipeline.publish(`transactions:group:${relevantWallet.group_id}`, JSON.stringify(transactionMessage));
+            }
+            await pipeline.exec();
+
+            return {
+                transaction: {
+                    wallet_id: relevantWallet.id,
+                    signature,
+                    block_time: new Date(blockTime * 1000).toISOString(),
+                    transaction_type: transactionType,
+                    sol_spent: transactionType === 'buy' ? totalSolAmount : 0,
+                    sol_received: transactionType === 'sell' ? totalSolAmount : 0,
+                    usd_spent: 0,
+                    usd_received: 0
+                },
+                tokenOperations: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    symbol: tc.symbol,
+                    name: tc.name,
+                    decimals: tc.decimals,
+                    amount: tc.amount,
+                    operation_type: transactionType
+                }))
+            };
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error processing transaction:`, error.message);
+            return null;
+        }
+    }
+
+    async bulkSaveToDb(transactions, tokenOperations) {
+        try {
+            await this.db.withTransaction(async (client) => {
+                const signatures = transactions.map(t => t.signature);
+                const existing = await client.query(
+                    'SELECT signature FROM transactions WHERE signature = ANY($1)',
+                    [signatures]
+                );
+                const existingSignatures = new Set(existing.rows.map(r => r.signature));
+                const newTransactions = transactions.filter(t => !existingSignatures.has(t.signature));
+
+                if (newTransactions.length === 0) return;
+
+                const transactionQuery = `
+                    INSERT INTO transactions (
+                        wallet_id, signature, block_time, transaction_type,
+                        sol_spent, sol_received, usd_spent, usd_received
+                    ) 
+                    SELECT * FROM unnest(
+                        $1::bigint[], $2::text[], $3::timestamptz[],
+                        $4::text[], $5::double precision[], $6::double precision[],
+                        $7::double precision[], $8::double precision[]
+                    )
+                    RETURNING id, signature
+                `;
+                const transactionValues = [
+                    newTransactions.map(t => t.wallet_id),
+                    newTransactions.map(t => t.signature),
+                    newTransactions.map(t => t.block_time),
+                    newTransactions.map(t => t.transaction_type),
+                    newTransactions.map(t => t.sol_spent),
+                    newTransactions.map(t => t.sol_received),
+                    newTransactions.map(t => t.usd_spent),
+                    newTransactions.map(t => t.usd_received)
+                ];
+
+                const transactionResult = await client.query(transactionQuery, transactionValues);
+                const transactionIds = new Map(transactionResult.rows.map(r => [r.signature, r.id]));
+
+                const tokenUpsertQuery = `
+                    INSERT INTO tokens (mint, symbol, name, decimals)
+                    SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::integer[])
+                    ON CONFLICT (mint) DO UPDATE SET
+                        symbol = EXCLUDED.symbol,
+                        name = EXCLUDED.name,
+                        decimals = EXCLUDED.decimals,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id, mint
+                `;
+                const uniqueTokens = [...new Set(tokenOperations.map(op => op.mint))].map(mint => {
+                    const op = tokenOperations.find(o => o.mint === mint);
+                    return { mint, symbol: op.symbol, name: op.name, decimals: op.decimals };
+                });
+                const tokenValues = [
+                    uniqueTokens.map(t => t.mint),
+                    uniqueTokens.map(t => t.symbol),
+                    uniqueTokens.map(t => t.name),
+                    uniqueTokens.map(t => t.decimals)
+                ];
+
+                const tokenResult = await client.query(tokenUpsertQuery, tokenValues);
+                const tokenIds = new Map(tokenResult.rows.map(r => [r.mint, r.id]));
+
+                const operationQuery = `
+                    INSERT INTO token_operations (transaction_id, token_id, amount, operation_type)
+                    SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::double precision[], $4::text[])
+                `;
+                const operationValues = [
+                    tokenOperations.map(op => transactionIds.get(op.signature)),
+                    tokenOperations.map(op => tokenIds.get(op.mint)),
+                    tokenOperations.map(op => op.amount),
+                    tokenOperations.map(op => op.operation_type)
+                ];
+
+                await client.query(operationQuery, operationValues);
+            });
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error bulk saving to DB:`, error.message);
+        }
+    }
+
+    findRelevantWallet(accountKeys) {
+        for (const accountKey of accountKeys) {
+            if (this.monitoredWallets.has(accountKey)) {
+                const walletMetadata = this.walletMetadata.get(accountKey);
+                if (walletMetadata && (!this.activeGroupId || walletMetadata.group_id === this.activeGroupId)) {
+                    return {
+                        address: accountKey,
+                        ...walletMetadata
+                    };
+                }
+            }
+        }
+        return null;
+    }
+
+    async fetchSolPrice() {
+        const now = Date.now();
+
+        if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
+            return this.solPriceCache.price;
+        }
+
+        try {
+            const cachedPrice = await redis.get('sol_price_grpc');
+            if (cachedPrice) {
+                const priceData = JSON.parse(cachedPrice);
+                this.solPriceCache = {
+                    price: priceData.price,
+                    lastUpdated: priceData.timestamp,
+                    cacheTimeout: 30000
+                };
+                return priceData.price;
+            }
+
+            const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+                timeout: 3000,
+                headers: { 'User-Agent': 'WalletPulse/3.0' }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.pairs && data.pairs.length > 0) {
+                    const bestPair = data.pairs.reduce((prev, current) =>
+                        (current.volume?.h24 || 0) > (prev.volume?.h24 || 0) ? current : prev
+                    );
+                    const newPrice = parseFloat(bestPair.priceUsd || 150);
+
+                    this.solPriceCache = {
+                        price: newPrice,
+                        lastUpdated: now,
+                        cacheTimeout: 30000
+                    };
+
+                    await redis.setex('sol_price_grpc', 30, JSON.stringify({
+                        price: newPrice,
+                        timestamp: now
+                    }));
+
+                    return newPrice;
+                }
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
+        }
+
+        return this.solPriceCache.price;
+    }
+
+    async handleReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.error(`[${new Date().toISOString()}] 🛑 Max reconnect attempts reached, stopping service`);
+            this.isStarted = false;
+            return;
+        }
+
+        this.reconnectAttempts++;
+        console.log(`[${new Date().toISOString()}] 🔄 Reconnecting stream (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+        await this.endStream();
+
+        if (this.batchTimer) {
+            clearTimeout(this.batchTimer);
+            this.batchTimer = null;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, this.reconnectInterval));
+
+        try {
+            await this.createFullStream();
+            console.log(`[${new Date().toISOString()}] ✅ Stream reconnection successful`);
+            this.reconnectAttempts = 0;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Stream reconnect failed:`, error.message);
+            this.reconnectInterval = Math.min(this.reconnectInterval * 1.5, 15000);
+            await this.handleReconnect();
+        }
+    }
+
+    async switchGroup(groupId) {
+        console.log(`[${new Date().toISOString()}] 🔄 Switching stream to group ${groupId || 'all'}`);
+
+        this.activeGroupId = groupId;
+        await this.loadMonitoredWallets(groupId);
+
+        console.log(`[${new Date().toISOString()}] ✅ Switched to group ${groupId || 'all'}: monitoring ${this.monitoredWallets.size.toLocaleString()} wallets`);
+
+        return {
+            success: true,
+            activeGroupId: this.activeGroupId,
+            monitoredWallets: this.monitoredWallets.size
+        };
+    }
+
+    async subscribeToWalletsBatch(walletAddresses, batchSize = 5000) {
+        console.log(`[${new Date().toISOString()}] ➕ Adding ${walletAddresses.length} wallets to stream monitoring`);
+
+        const successful = walletAddresses.length;
         await this.loadMonitoredWallets(this.activeGroupId);
-        return { successful: walletAddresses.length, failed: 0, errors: [] };
+
+        console.log(`[${new Date().toISOString()}] ✅ Wallet monitoring updated: ${this.monitoredWallets.size.toLocaleString()} total wallets`);
+
+        return {
+            successful,
+            failed: 0,
+            errors: [],
+            totalMonitored: this.monitoredWallets.size
+        };
     }
 
     async removeAllWallets(groupId = null) {
+        console.log(`[${new Date().toISOString()}] 🗑️ Removing wallets from stream monitoring${groupId ? ` for group ${groupId}` : ''}`);
+
         await this.loadMonitoredWallets(this.activeGroupId);
-        return { success: true, message: 'Wallets updated' };
+
+        return {
+            success: true,
+            message: 'Wallet monitoring updated for stream',
+            details: {
+                remainingWallets: this.monitoredWallets.size,
+                groupId
+            }
+        };
     }
 
     getStatus() {
@@ -605,50 +712,341 @@ class SolanaGrpcService {
             isStarted: this.isStarted,
             activeGroupId: this.activeGroupId,
             totalSubscriptions: this.monitoredWallets.size,
+            numStreams: 1,
             messageCount: this.messageCount,
+            filteredCount: this.filteredCount,
             reconnectAttempts: this.reconnectAttempts,
-            mode: 'optimized_real_time',
-            stats: this.stats
+            grpcEndpoint: this.grpcEndpoint,
+            mode: 'real_time_stream',
+            performance: {
+                totalReceived: this.stats.totalReceived,
+                totalFiltered: this.stats.totalFiltered,
+                totalProcessed: this.stats.totalProcessed,
+                filterEfficiency: this.stats.filterEfficiency,
+                avgFilterTime: this.stats.avgFilterTime,
+                batchSize: this.batchSize,
+                batchTimeout: this.batchTimeout,
+                solPriceCached: this.solPriceCache.lastUpdated > 0,
+                cacheStats: {
+                    processedTransactions: this.processedTransactions.size,
+                    recentlyProcessed: this.recentlyProcessed.size,
+                    walletMetadata: this.walletMetadata.size,
+                    solPriceAge: Date.now() - this.solPriceCache.lastUpdated,
+                    solPrice: this.solPriceCache.price
+                }
+            }
         };
     }
 
     getPerformanceStats() {
+        const now = Date.now();
         return {
-            mode: 'real_time_optimized',
+            mode: 'real_time_stream',
             totalMonitoredWallets: this.monitoredWallets.size,
-            messagesReceived: this.stats.received,
-            messagesFiltered: this.stats.filtered,
-            messagesProcessed: this.stats.processed,
-            filterEfficiency: this.stats.received > 0 ? ((this.stats.filtered / this.stats.received) * 100).toFixed(2) : 0,
-            avgFilterTimeMs: 0.1, 
-            isHealthy: this.isStarted && this.stream !== null,
-            queueSize: this.transactionQueue.length,
-            cacheSize: this.processedTransactions.size
+            messagesReceived: this.messageCount,
+            messagesFiltered: this.filteredCount,
+            messagesProcessed: this.stats.totalProcessed,
+            filterEfficiency: this.stats.filterEfficiency,
+            avgFilterTimeMs: this.stats.avgFilterTime,
+            currentBatchSize: this.transactionBatch.size,
+            caches: {
+                processedTransactions: this.processedTransactions.size,
+                recentlyProcessed: this.recentlyProcessed.size,
+                walletMetadata: this.walletMetadata.size,
+                walletToGroup: this.walletToGroup.size
+            },
+            solPriceCache: {
+                price: this.solPriceCache.price,
+                lastUpdated: this.solPriceCache.lastUpdated,
+                ageMs: now - this.solPriceCache.lastUpdated
+            },
+            reconnectAttempts: this.reconnectAttempts,
+            isHealthy: this.isStarted && this.stream !== null
         };
     }
 
+    async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
+        const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+        let transactionType = null;
+        let totalSolAmount = 0;
+
+        const usdcPreBalance = (meta.preTokenBalances || []).find(b => b.mint === USDC_MINT && b.owner === walletAddress);
+        const usdcPostBalance = (meta.postTokenBalances || []).find(b => b.mint === USDC_MINT && b.owner === walletAddress);
+
+        let usdcChange = 0;
+        if (usdcPreBalance && usdcPostBalance) {
+            usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) - Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
+        } else if (usdcPostBalance) {
+            usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
+        } else if (usdcPreBalance) {
+            usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
+        }
+
+        if (usdcChange < 0) {
+            transactionType = 'buy';
+            totalSolAmount = Math.abs(usdcChange) / solPrice;
+        } else if (usdcChange > 0) {
+            transactionType = 'sell';
+            totalSolAmount = usdcChange / solPrice;
+        } else if (solChange < -this.BUY_THRESHOLD) {
+            transactionType = 'buy';
+            totalSolAmount = Math.abs(solChange);
+        } else if (solChange > this.SELL_THRESHOLD) {
+            transactionType = 'sell';
+            totalSolAmount = solChange;
+        } else {
+            return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
+        }
+
+        const tokenChanges = await this.analyzeTokenChangesFromGrpc(meta, transactionType, walletAddress);
+        return { transactionType, totalSolAmount, tokenChanges };
+    }
+
+    async analyzeTokenChangesFromGrpc(meta, transactionType, walletAddress) {
+        const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
+        const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+        const tokenChanges = [];
+
+        const allBalanceChanges = new Map();
+        for (const pre of meta.preTokenBalances || []) {
+            const key = `${pre.mint}-${pre.accountIndex}`;
+            allBalanceChanges.set(key, {
+                mint: pre.mint,
+                accountIndex: pre.accountIndex,
+                owner: pre.owner,
+                preAmount: pre.uiTokenAmount.amount,
+                preUiAmount: pre.uiTokenAmount.uiAmount,
+                postAmount: '0',
+                postUiAmount: 0,
+                decimals: pre.uiTokenAmount.decimals
+            });
+        }
+
+        for (const post of meta.postTokenBalances || []) {
+            const key = `${post.mint}-${post.accountIndex}`;
+            if (allBalanceChanges.has(key)) {
+                const existing = allBalanceChanges.get(key);
+                existing.postAmount = post.uiTokenAmount.amount;
+                existing.postUiAmount = post.uiTokenAmount.uiAmount;
+            } else {
+                allBalanceChanges.set(key, {
+                    mint: post.mint,
+                    accountIndex: post.accountIndex,
+                    owner: post.owner,
+                    preAmount: '0',
+                    preUiAmount: 0,
+                    postAmount: post.uiTokenAmount.amount,
+                    postUiAmount: post.uiTokenAmount.uiAmount,
+                    decimals: post.uiTokenAmount.decimals
+                });
+            }
+        }
+
+        const mintChanges = new Map();
+        for (const [key, change] of allBalanceChanges) {
+            if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT) continue;
+            if (change.owner !== walletAddress) continue;
+
+            const rawChange = Number(change.postAmount) - Number(change.preAmount);
+            let isValidChange = (transactionType === 'buy' && rawChange > 0) || (transactionType === 'sell' && rawChange < 0);
+
+            if (isValidChange) {
+                if (mintChanges.has(change.mint)) {
+                    const existing = mintChanges.get(change.mint);
+                    existing.totalRawChange += Math.abs(rawChange);
+                } else {
+                    mintChanges.set(change.mint, {
+                        mint: change.mint,
+                        decimals: change.decimals,
+                        totalRawChange: Math.abs(rawChange)
+                    });
+                }
+            }
+        }
+
+        if (mintChanges.size === 0) return [];
+
+        const mints = Array.from(mintChanges.keys());
+        const tokenInfos = await this.batchFetchTokenMetadataCached(mints);
+
+        for (const [mint, aggregatedChange] of mintChanges) {
+            const tokenInfo = tokenInfos.get(mint) || {
+                symbol: mint.slice(0, 4).toUpperCase(),
+                name: `Token ${mint.slice(0, 8)}...`,
+                decimals: aggregatedChange.decimals
+            };
+
+            tokenChanges.push({
+                mint,
+                amount: aggregatedChange.totalRawChange / Math.pow(10, aggregatedChange.decimals),
+                rawChange: aggregatedChange.totalRawChange,
+                decimals: aggregatedChange.decimals,
+                symbol: tokenInfo.symbol,
+                name: tokenInfo.name
+            });
+        }
+
+        return tokenChanges;
+    }
+
+    async batchFetchTokenMetadataCached(mints) {
+        const tokenInfos = new Map();
+        const uncachedMints = [];
+
+        const pipeline = redis.pipeline();
+        for (const mint of mints) {
+            pipeline.get(`token:${mint}`);
+        }
+        const results = await pipeline.exec();
+
+        results.forEach(([err, cachedToken], index) => {
+            if (!err && cachedToken) {
+                try {
+                    tokenInfos.set(mints[index], JSON.parse(cachedToken));
+                } catch (parseError) {
+                    uncachedMints.push(mints[index]);
+                }
+            } else {
+                uncachedMints.push(mints[index]);
+            }
+        });
+
+        if (uncachedMints.length > 0) {
+            try {
+                const newTokenInfos = await batchFetchTokenMetadata(uncachedMints, null);
+                const cachePipeline = redis.pipeline();
+                for (const [mint, tokenInfo] of newTokenInfos) {
+                    if (tokenInfo) {
+                        tokenInfos.set(mint, tokenInfo);
+                        cachePipeline.set(`token:${mint}`, JSON.stringify(tokenInfo), 'EX', 12 * 60 * 60);
+                    }
+                }
+                await cachePipeline.exec();
+            } catch (error) {
+                console.error(`[${new Date().toISOString()}] ❌ Error batch fetching token metadata:`, error.message);
+                for (const mint of uncachedMints) {
+                    if (!tokenInfos.has(mint)) {
+                        tokenInfos.set(mint, {
+                            symbol: mint.slice(0, 4).toUpperCase(),
+                            name: `Token ${mint.slice(0, 8)}...`,
+                            decimals: 6
+                        });
+                    }
+                }
+            }
+        }
+
+        return tokenInfos;
+    }
+
+    extractSignature(transactionData) {
+        try {
+            const sigObj = transactionData.signature ||
+                (transactionData.signatures && transactionData.signatures[0]) ||
+                transactionData.transaction?.signature ||
+                (transactionData.transaction?.signatures && transactionData.transaction.signatures[0]) ||
+                transactionData.tx?.signature ||
+                (transactionData.tx?.signatures && transactionData.tx.signatures[0]);
+
+            if (!sigObj) return null;
+
+            let signature;
+            if (sigObj.type === 'Buffer' && Array.isArray(sigObj.data)) {
+                signature = bs58.encode(Buffer.from(sigObj.data));
+            } else if (Buffer.isBuffer(sigObj)) {
+                signature = bs58.encode(sigObj);
+            } else if (typeof sigObj === 'string') {
+                signature = sigObj;
+            } else {
+                signature = bs58.encode(Buffer.from(sigObj));
+            }
+
+            if (signature.length < 80 || signature.length > 88) return null;
+            return signature;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error extracting signature:`, error.message);
+            return null;
+        }
+    }
+
+    forceCleanupCaches() {
+        const before = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size,
+            walletMetadata: this.walletMetadata.size
+        };
+
+        if (this.processedTransactions.size > 5000) {
+            const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
+            toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
+        } else {
+            this.processedTransactions.clear();
+        }
+
+        if (this.recentlyProcessed.size > 2500) {
+            const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
+            toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
+        } else {
+            this.recentlyProcessed.clear();
+        }
+
+        this.lastProcessedCleanup = Date.now();
+        this.lastRecentlyProcessedCleanup = Date.now();
+
+        const after = {
+            processedTransactions: this.processedTransactions.size,
+            recentlyProcessed: this.recentlyProcessed.size,
+            walletMetadata: this.walletMetadata.size
+        };
+
+        console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
+        return { before, after };
+    }
+
+    clearCaches() {
+        console.log(`[${new Date().toISOString()}] 🧹 Manual cache cleanup`);
+        return this.forceCleanupCaches();
+    }
+
     async stop() {
-        console.log(`[${new Date().toISOString()}] ⏹️ Stopping real-time service`);
+        console.log(`[${new Date().toISOString()}] ⏹️ Stopping stream service`);
+
         this.isStarted = false;
 
-        if (this.processingTimer) {
-            clearTimeout(this.processingTimer);
-            this.processingTimer = null;
+        if (this.batchTimer) {
+            clearTimeout(this.batchTimer);
+            this.batchTimer = null;
+        }
+
+        if (this.transactionBatch.size > 0) {
+            console.log(`[${new Date().toISOString()}] ⚡ Processing final batch of ${this.transactionBatch.size} transactions`);
+            await this.processBatch();
         }
 
         await this.endStream();
-        console.log(`[${new Date().toISOString()}] ✅ Real-time service stopped`);
+
+        console.log(`[${new Date().toISOString()}] ✅ Stream service stopped`);
     }
 
     async shutdown() {
+        console.log(`[${new Date().toISOString()}] 🛑 Shutting down stream service`);
+
         await this.stop();
+
         this.processedTransactions.clear();
-        this.transactionQueue = [];
+        this.recentlyProcessed.clear();
+        this.transactionBatch.clear();
         this.monitoredWallets.clear();
         this.walletToGroup.clear();
         this.walletMetadata.clear();
-        await this.db.close();
-        console.log(`[${new Date().toISOString()}] ✅ Real-time service shutdown complete`);
+
+        try {
+            await this.db.close();
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error closing DB:`, error.message);
+        }
+
+        console.log(`[${new Date().toISOString()}] ✅ Stream service shutdown complete`);
     }
 }
 
