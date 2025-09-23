@@ -301,21 +301,23 @@ class SolanaGrpcService {
     quickFilterTransaction(transactionData) {
         try {
             const accountKeys = this.extractAllAccountKeys(transactionData);
+            const matchedWallets = [];
 
             for (const accountKey of accountKeys) {
                 if (this.monitoredWallets.has(accountKey)) {
-                    if (this.activeGroupId) {
-                        const walletGroup = this.walletToGroup.get(accountKey);
-                        if (walletGroup === this.activeGroupId) {
-                            return true;
-                        }
-                    } else {
-                        return true;
+                    const walletGroup = this.walletToGroup.get(accountKey);
+                    if (this.activeGroupId && walletGroup !== this.activeGroupId) {
+                        continue;
                     }
+                    matchedWallets.push({ address: accountKey, groupId: walletGroup });
                 }
             }
 
-            return false;
+            const isRelevant = matchedWallets.length > 0;
+            const signature = this.extractSignature(transactionData) || 'unknown';
+            console.debug(`[${new Date().toISOString()}] 🔍 Filtering tx ${signature}: isRelevant=${isRelevant}, matchedWallets=${JSON.stringify(matchedWallets.map(w => ({ address: w.address, group: w.groupId })))}`);
+
+            return isRelevant;
         } catch (error) {
             console.error(`[${new Date().toISOString()}] ❌ Error in quick filter:`, error.message);
             return false;
@@ -407,6 +409,20 @@ class SolanaGrpcService {
         for (const { value } of successful) {
             if (value) {
                 try {
+                    console.log(`[${new Date().toISOString()}] 📤 Transaction processed:`, {
+                        signature: value.signature,
+                        wallet: value.walletAddress,
+                        groupId: value.groupId,
+                        groupName: value.groupName,
+                        transactionType: value.transactionType,
+                        solAmount: value.solAmount,
+                        tokens: value.tokens.map(t => ({
+                            mint: t.mint,
+                            symbol: t.symbol,
+                            amount: t.amount
+                        }))
+                    });
+
                     const messageStr = JSON.stringify(value);
                     console.log(`[${new Date().toISOString()}] 📤 Publishing transaction to Redis:`, {
                         signature: value.signature,
@@ -701,7 +717,11 @@ class SolanaGrpcService {
     async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
         try {
             const walletIndex = accountKeys.indexOf(wallet.address);
-            if (walletIndex === -1) return null;
+            console.debug(`[${new Date().toISOString()}] 🔍 Processing tx ${signature}: wallet=${wallet.address}, groupId=${wallet.group_id}, walletIndex=${walletIndex}`);
+            if (walletIndex === -1) {
+                console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: wallet not in accountKeys`);
+                return null;
+            }
 
             const preBalance = meta.preBalances[walletIndex] || 0;
             const postBalance = meta.postBalances[walletIndex] || 0;
@@ -716,7 +736,10 @@ class SolanaGrpcService {
                 solPrice
             });
 
+            console.debug(`[${new Date().toISOString()}] 🔍 Tx ${signature} analysis: type=${transactionType}, solChange=${solChange}, solAmount=${totalSolAmount}, tokens=${JSON.stringify(tokenChanges.map(t => ({ mint: t.mint, symbol: t.symbol, amount: t.amount })))}`);
+
             if (!transactionType || tokenChanges.length === 0) {
+                console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: no valid type or token changes`);
                 return null;
             }
 
@@ -751,10 +774,11 @@ class SolanaGrpcService {
                 return transactionMessage; 
             }
 
+            console.debug(`[${new Date().toISOString()}] 🛑 Skipping tx ${signature}: failed to save to DB`);
             return null;
 
         } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
+            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction ${signature}:`, error.message);
             return null;
         }
     }
