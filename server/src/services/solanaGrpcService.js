@@ -34,7 +34,7 @@ class SolanaGrpcService {
 
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 100; 
+        this.batchSize = 500; 
         this.batchTimeout = 10; 
 
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
