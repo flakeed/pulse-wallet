@@ -134,6 +134,10 @@ CREATE INDEX IF NOT EXISTS idx_transactions_wallet_time ON transactions(wallet_i
 CREATE INDEX IF NOT EXISTS idx_token_ops_tx_token ON token_operations(transaction_id, token_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_group_active ON wallets(group_id, is_active) WHERE is_active = true;
 
+ALTER TABLE transactions
+ADD COLUMN usd_spent DECIMAL(20,2) DEFAULT 0,
+ADD COLUMN usd_received DECIMAL(20,2) DEFAULT 0;
+
 INSERT INTO users (telegram_id, username, first_name, is_admin, is_active)
 VALUES (789676557, 'admin', 'Admin', true, true)
 ON CONFLICT (telegram_id) DO UPDATE SET

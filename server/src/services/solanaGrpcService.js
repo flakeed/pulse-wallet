@@ -7,59 +7,58 @@ const { batchFetchTokenMetadata } = require('./tokenService');
 
 class SolanaGrpcService {
     constructor() {
-        this.grpcEndpoint = process.env.GRPC_ENDPOINT || 'http://45.134.108.254:10000';
-        this.client = null;
-        this.stream = null;
-        this.db = new Database();
-        this.isStarted = false;
-        this.isConnecting = false;
-        this.reconnectInterval = 5000;
-        this.maxReconnectAttempts = 10;
-        this.reconnectAttempts = 0;
-        this.messageCount = 0;
-        this.filteredCount = 0;
-        this.activeGroupId = null;
+    this.grpcEndpoint = process.env.GRPC_ENDPOINT || 'http://45.134.108.254:10000';
+    this.client = null;
+    this.stream = null;
+    this.db = new Database();
+    this.isStarted = false;
+    this.isConnecting = false;
+    this.reconnectInterval = 5000;
+    this.maxReconnectAttempts = 10;
+    this.reconnectAttempts = 0;
+    this.messageCount = 0;
+    this.filteredCount = 0;
+    this.activeGroupId = null;
 
-        this.monitoredWallets = new Set(); 
-        this.walletToGroup = new Map(); 
-        this.walletMetadata = new Map(); 
+    this.monitoredWallets = new Set();
+    this.walletToGroup = new Map();
+    this.walletMetadata = new Map();
 
-        this.processedTransactions = new Set();
-        this.recentlyProcessed = new Set();
-        this.solPriceCache = {
-            price: 150,
-            lastUpdated: 0,
-            cacheTimeout: 60000
-        };
+    this.processedTransactions = new Set();
+    this.recentlyProcessed = new Set();
+    this.solPriceCache = {
+        price: 210,
+        lastUpdated: 0,
+        cacheTimeout: 60000
+    };
 
-        this.transactionBatch = new Map();
-        this.batchTimer = null;
-        this.batchSize = 500; 
-        this.batchTimeout = 50; 
+    this.transactionBatch = new Map();
+    this.batchTimer = null;
+    this.batchSize = 500;
+    this.batchTimeout = 50;
 
-        this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
-        this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
+    this.VALUE_THRESHOLD = 0.1;
 
-        this.stats = {
-            totalReceived: 0,
-            totalFiltered: 0,
-            totalProcessed: 0,
-            filterEfficiency: 0,
-            avgFilterTime: 0,
-            lastStatsUpdate: Date.now()
-        };
+    this.stats = {
+        totalReceived: 0,
+        totalFiltered: 0,
+        totalProcessed: 0,
+        filterEfficiency: 0,
+        avgFilterTime: 0,
+        lastStatsUpdate: Date.now()
+    };
 
-        this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
-        this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
-        this.lastProcessedCleanup = Date.now();
-        this.lastRecentlyProcessedCleanup = Date.now();
+    this.PROCESSED_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
+    this.RECENTLY_PROCESSED_CLEANUP_INTERVAL = 60 * 60 * 1000;
+    this.lastProcessedCleanup = Date.now();
+    this.lastRecentlyProcessedCleanup = Date.now();
 
-        this.setupCacheCleanup();
-        this.setupStatsReporting();
+    this.setupCacheCleanup();
+    this.setupStatsReporting();
 
-        console.log(`[${new Date().toISOString()}] 🚀 Full Stream Service initialized`);
-        console.log(`[${new Date().toISOString()}] 💰 SOL thresholds: buy>${this.BUY_THRESHOLD}, sell>${this.SELL_THRESHOLD}`);
-    }
+    console.log(`[${new Date().toISOString()}] 🚀 Full Stream Service initialized`);
+    console.log(`[${new Date().toISOString()}] 💰 Value threshold: >${this.VALUE_THRESHOLD} SOL or equivalent in USDC/USDT`);
+}
 
     setupStatsReporting() {
 
@@ -203,28 +202,22 @@ async createFullStream() {
         });
 
         const request = {
-
             accounts: {},
             slots: {},
-
             transactions: {
-
                 [""]: {  
-                    vote: false,           
-                    failed: false,         
-                    accountInclude: [],    
-                    accountExclude: [],    
-                    accountRequired: []    
+                    vote: false,
+                    failed: false,
+                    accountInclude: [],
+                    accountExclude: [],
+                    accountRequired: []
                 }
             },
-
             transactionsStatus: {},
             entry: {},
             blocks: {},
             blocksMeta: {},
-
             commitment: CommitmentLevel.CONFIRMED,
-
             accountsDataSlice: []
         };
 
@@ -234,7 +227,6 @@ async createFullStream() {
             this.stream.write(request, err => {
                 if (err) {
                     console.error(`[${new Date().toISOString()}] ❌ Full stream subscription failed:`, err.message);
-                    console.error(`[${new Date().toISOString()}] 🔍 Request structure:`, JSON.stringify(request, null, 2));
                     reject(err);
                 } else {
                     console.log(`[${new Date().toISOString()}] ✅ Full Solana stream subscription active`);
@@ -306,31 +298,29 @@ async createFullStream() {
         }
     }
 
-    quickFilterTransaction(transactionData) {
-        try {
+quickFilterTransaction(transactionData) {
+    try {
+        const accountKeys = this.extractAllAccountKeys(transactionData);
 
-            const accountKeys = this.extractAllAccountKeys(transactionData);
-
-            for (const accountKey of accountKeys) {
-                if (this.monitoredWallets.has(accountKey)) {
-
-                    if (this.activeGroupId) {
-                        const walletGroup = this.walletToGroup.get(accountKey);
-                        if (walletGroup === this.activeGroupId) {
-                            return true;
-                        }
-                    } else {
+        for (const accountKey of accountKeys) {
+            if (this.monitoredWallets.has(accountKey)) {
+                if (this.activeGroupId) {
+                    const walletGroup = this.walletToGroup.get(accountKey);
+                    if (walletGroup === this.activeGroupId) {
                         return true;
                     }
+                } else {
+                    return true; 
                 }
             }
-
-            return false;
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error in quick filter:`, error.message);
-            return false;
         }
+
+        return false;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error in quick filter:`, error.message);
+        return false;
     }
+}
 
     extractAllAccountKeys(transactionData) {
         const accountKeys = [];
@@ -499,58 +489,81 @@ async createFullStream() {
         return null;
     }
 
-    async fetchSolPrice() {
-        const now = Date.now();
+async fetchSolPrice() {
+    const now = Date.now();
 
-        if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
-            return this.solPriceCache.price;
-        }
-
-        try {
-            const cachedPrice = await redis.get('sol_price_grpc');
-            if (cachedPrice) {
-                const priceData = JSON.parse(cachedPrice);
-                this.solPriceCache = {
-                    price: priceData.price,
-                    lastUpdated: priceData.timestamp,
-                    cacheTimeout: 60000
-                };
-                return priceData.price;
-            }
-
-            const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
-                timeout: 5000,
-                headers: { 'User-Agent': 'WalletPulse/3.0' }
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                if (data.pairs && data.pairs.length > 0) {
-                    const bestPair = data.pairs.reduce((prev, current) =>
-                        (current.volume?.h24 || 0) > (prev.volume?.h24 || 0) ? current : prev
-                    );
-                    const newPrice = parseFloat(bestPair.priceUsd || 150);
-
-                    this.solPriceCache = {
-                        price: newPrice,
-                        lastUpdated: now,
-                        cacheTimeout: 60000
-                    };
-
-                    await redis.setex('sol_price_grpc', 60, JSON.stringify({
-                        price: newPrice,
-                        timestamp: now
-                    }));
-
-                    return newPrice;
-                }
-            }
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
-        }
-
+    if (now - this.solPriceCache.lastUpdated < this.solPriceCache.cacheTimeout) {
         return this.solPriceCache.price;
     }
+
+    try {
+        const cachedPrice = await redis.get('sol_price_grpc');
+        if (cachedPrice) {
+            const priceData = JSON.parse(cachedPrice);
+            this.solPriceCache = {
+                price: priceData.price,
+                lastUpdated: priceData.timestamp,
+                cacheTimeout: 60000
+            };
+            return priceData.price;
+        }
+
+        const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+            timeout: 5000,
+            headers: { 'User-Agent': 'WalletPulse/3.0' }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            if (data.pairs && data.pairs.length > 0) {
+                const bestPair = data.pairs.reduce((prev, current) =>
+                    (current.volume?.h24 || 0) > (prev.volume?.h24 || 0) ? current : prev
+                );
+                const newPrice = parseFloat(bestPair.priceUsd || 150);
+
+                this.solPriceCache = {
+                    price: newPrice,
+                    lastUpdated: now,
+                    cacheTimeout: 60000
+                };
+
+                await redis.setex('sol_price_grpc', 60, JSON.stringify({
+                    price: newPrice,
+                    timestamp: now
+                }));
+
+                return newPrice;
+            }
+        }
+
+        const fallbackResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', {
+            timeout: 5000,
+            headers: { 'User-Agent': 'WalletPulse/3.0' }
+        });
+
+        if (fallbackResponse.ok) {
+            const data = await fallbackResponse.json();
+            const newPrice = parseFloat(data.solana.usd || 150);
+            this.solPriceCache = {
+                price: newPrice,
+                lastUpdated: now,
+                cacheTimeout: 60000
+            };
+
+            await redis.setex('sol_price_grpc', 60, JSON.stringify({
+                price: newPrice,
+                timestamp: now
+            }));
+
+            return newPrice;
+        }
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error fetching SOL price:`, error.message);
+    }
+
+    return this.solPriceCache.price; 
+}
 
     async handleReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
@@ -689,129 +702,134 @@ async createFullStream() {
         };
     }
 
-    async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
-        try {
-            const walletIndex = accountKeys.indexOf(wallet.address);
-            if (walletIndex === -1) return null;
+async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
+    try {
+        const walletIndex = accountKeys.indexOf(wallet.address);
+        if (walletIndex === -1) return null;
 
-            const preBalance = meta.preBalances[walletIndex] || 0;
-            const postBalance = meta.postBalances[walletIndex] || 0;
-            const solChange = (postBalance - preBalance) / 1e9;
+        const preBalance = meta.preBalances[walletIndex] || 0;
+        const postBalance = meta.postBalances[walletIndex] || 0;
+        const solChange = (postBalance - preBalance) / 1e9;
 
-            const solPrice = await this.fetchSolPrice();
+        const solPrice = await this.fetchSolPrice();
 
-            const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
-                meta,
-                solChange,
+        const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+            meta,
+            solChange,
+            walletAddress: wallet.address,
+            solPrice
+        });
+
+        if (!transactionType || tokenChanges.length === 0) {
+            return null;
+        }
+
+        const savedTransaction = await this.saveTransactionToDb({
+            wallet,
+            signature,
+            blockTime,
+            transactionType,
+            totalSolAmount,
+            tokenChanges,
+            solPrice
+        });
+
+        if (savedTransaction) {
+            const usdAmount = totalSolAmount * solPrice;
+            const transactionMessage = {
+                signature,
                 walletAddress: wallet.address,
-                solPrice
-            });
+                walletName: wallet.name,
+                groupId: wallet.group_id,
+                groupName: wallet.group_name,
+                transactionType,
+                solAmount: totalSolAmount,
+                usdAmount: usdAmount,
+                tokens: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    amount: tc.amount,
+                    symbol: tc.symbol,
+                    name: tc.name
+                })),
+                timestamp: new Date(blockTime * 1000).toISOString()
+            };
 
-            if (!transactionType || tokenChanges.length === 0) {
+            const pipeline = redis.pipeline();
+            pipeline.publish('transactions', JSON.stringify(transactionMessage));
+            if (wallet.group_id) {
+                pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
+            }
+            await pipeline.exec();
+
+            console.log(`[${new Date().toISOString()}] ✅ Processed ${transactionType} transaction ${signature.slice(0, 8)}... for wallet ${wallet.address.slice(0, 8)}...: ${totalSolAmount.toFixed(4)} SOL ($${usdAmount.toFixed(2)} USD)`);
+            return savedTransaction;
+        }
+
+        return null;
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
+        return null;
+    }
+}
+
+async saveTransactionToDb({ wallet, signature, blockTime, transactionType, totalSolAmount, tokenChanges, solPrice }) {
+    try {
+        return await this.db.withTransaction(async (client) => {
+            const finalCheck = await client.query(
+                'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
+                [signature]
+            );
+            if (finalCheck.rows.length > 0) {
                 return null;
             }
 
-            const savedTransaction = await this.saveTransactionToDb({
-                wallet,
+            const usdAmount = totalSolAmount * solPrice;
+
+            const transactionQuery = `
+                INSERT INTO transactions (
+                    wallet_id, signature, block_time, transaction_type,
+                    sol_spent, sol_received, usd_spent, usd_received
+                ) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id, signature, transaction_type
+            `;
+
+            const transactionResult = await client.query(transactionQuery, [
+                wallet.id,
                 signature,
-                blockTime,
+                new Date(blockTime * 1000).toISOString(),
                 transactionType,
-                totalSolAmount,
-                tokenChanges,
-                solPrice
-            });
+                transactionType === 'buy' ? totalSolAmount : 0,
+                transactionType === 'sell' ? totalSolAmount : 0,
+                transactionType === 'buy' ? usdAmount : 0,
+                transactionType === 'sell' ? usdAmount : 0
+            ]);
 
-            if (savedTransaction) {
-                const transactionMessage = {
-                    signature,
-                    walletAddress: wallet.address,
-                    walletName: wallet.name,
-                    groupId: wallet.group_id,
-                    groupName: wallet.group_name,
-                    transactionType,
-                    solAmount: totalSolAmount,
-                    tokens: tokenChanges.map(tc => ({
-                        mint: tc.mint,
-                        amount: tc.amount,
-                        symbol: tc.symbol,
-                        name: tc.name
-                    })),
-                    timestamp: new Date(blockTime * 1000).toISOString()
-                };
-
-                const pipeline = redis.pipeline();
-                pipeline.publish('transactions', JSON.stringify(transactionMessage));
-                if (wallet.group_id) {
-                    pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
-                }
-                await pipeline.exec();
-
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType}) for wallet ${wallet.address.slice(0, 8)}...`);
-                return savedTransaction;
+            if (transactionResult.rows.length === 0) {
+                return null;
             }
 
-            return null;
+            const transaction = transactionResult.rows[0];
 
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction:`, error.message);
-            return null;
-        }
+            const tokenPromises = tokenChanges.map(tokenChange =>
+                this.saveTokenOperationInTransaction(client, transaction.id, tokenChange, transactionType)
+            );
+            await Promise.all(tokenPromises);
+
+            return {
+                signature: signature,
+                type: transactionType,
+                solAmount: totalSolAmount,
+                usdAmount: usdAmount,
+                tokensChanged: tokenChanges,
+            };
+        });
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error saving transaction to DB:`, error.message);
+        return null;
     }
-
-    async saveTransactionToDb({ wallet, signature, blockTime, transactionType, totalSolAmount, tokenChanges, solPrice }) {
-        try {
-            return await this.db.withTransaction(async (client) => {
-                const finalCheck = await client.query(
-                    'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
-                    [signature]
-                );
-                if (finalCheck.rows.length > 0) {
-                    return null;
-                }
-
-                const transactionQuery = `
-                    INSERT INTO transactions (
-                        wallet_id, signature, block_time, transaction_type,
-                        sol_spent, sol_received, usd_spent, usd_received
-                    ) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    RETURNING id, signature, transaction_type
-                `;
-
-                const transactionResult = await client.query(transactionQuery, [
-                    wallet.id,
-                    signature,
-                    new Date(blockTime * 1000).toISOString(),
-                    transactionType,
-                    transactionType === 'buy' ? totalSolAmount : 0,
-                    transactionType === 'sell' ? totalSolAmount : 0,
-                    0,
-                    0
-                ]);
-
-                if (transactionResult.rows.length === 0) {
-                    return null;
-                }
-
-                const transaction = transactionResult.rows[0];
-
-                const tokenPromises = tokenChanges.map(tokenChange =>
-                    this.saveTokenOperationInTransaction(client, transaction.id, tokenChange, transactionType)
-                );
-                await Promise.all(tokenPromises);
-
-                return {
-                    signature: signature,
-                    type: transactionType,
-                    solAmount: totalSolAmount,
-                    tokensChanged: tokenChanges,
-                };
-            });
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error saving transaction to DB:`, error.message);
-            return null;
-        }
-    }
+}
 
     async saveTokenOperationInTransaction(client, transactionId, tokenChange, transactionType) {
         try {
@@ -853,53 +871,160 @@ async createFullStream() {
         }
     }
 
-    async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
-        const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
+    const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+    const VALUE_THRESHOLD_SOL = 0.1; 
+    const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-        let transactionType = null;
-        let totalSolAmount = 0;
+    let transactionType = null;
+    let totalSolAmount = 0;
+    const tokenChanges = [];
 
-        const usdcPreBalance = (meta.preTokenBalances || []).find(b =>
-            b.mint === USDC_MINT && b.owner === walletAddress
-        );
-        const usdcPostBalance = (meta.postTokenBalances || []).find(b =>
-            b.mint === USDC_MINT && b.owner === walletAddress
-        );
+    const usdcPreBalance = (meta.preTokenBalances || []).find(b =>
+        b.mint === USDC_MINT && b.owner === walletAddress
+    );
+    const usdcPostBalance = (meta.postTokenBalances || []).find(b =>
+        b.mint === USDC_MINT && b.owner === walletAddress
+    );
 
-        let usdcChange = 0;
-        if (usdcPreBalance && usdcPostBalance) {
-            usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) -
-                Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
-        } else if (usdcPostBalance) {
-            usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
-        } else if (usdcPreBalance) {
-            usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
-        }
-
-        if (usdcChange < 0) {
-            transactionType = 'buy';
-            totalSolAmount = Math.abs(usdcChange) / solPrice;
-        } else if (usdcChange > 0) {
-            transactionType = 'sell';
-            totalSolAmount = usdcChange / solPrice;
-        } else if (solChange < -this.BUY_THRESHOLD) {
-            transactionType = 'buy';
-            totalSolAmount = Math.abs(solChange);
-        } else if (solChange > this.SELL_THRESHOLD) {
-            transactionType = 'sell';
-            totalSolAmount = solChange;
-        } else {
-            return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
-        }
-
-        const tokenChanges = await this.analyzeTokenChangesFromGrpc(
-            meta,
-            transactionType,
-            walletAddress
-        );
-
-        return { transactionType, totalSolAmount, tokenChanges };
+    let usdcChange = 0;
+    if (usdcPreBalance && usdcPostBalance) {
+        usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) -
+            Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
+    } else if (usdcPostBalance) {
+        usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
+    } else if (usdcPreBalance) {
+        usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
     }
+
+    const usdtPreBalance = (meta.preTokenBalances || []).find(b =>
+        b.mint === USDT_MINT && b.owner === walletAddress
+    );
+    const usdtPostBalance = (meta.postTokenBalances || []).find(b =>
+        b.mint === USDT_MINT && b.owner === walletAddress
+    );
+
+    let usdtChange = 0;
+    if (usdtPreBalance && usdtPostBalance) {
+        usdtChange = (Number(usdtPostBalance.uiTokenAmount.amount) -
+            Number(usdtPreBalance.uiTokenAmount.amount)) / 1e6;
+    } else if (usdtPostBalance) {
+        usdtChange = Number(usdtPostBalance.uiTokenAmount.uiAmount || 0);
+    } else if (usdtPreBalance) {
+        usdtChange = -Number(usdtPreBalance.uiTokenAmount.uiAmount || 0);
+    }
+
+    const stablecoinChange = usdcChange + usdtChange; 
+    if (stablecoinChange < 0 && Math.abs(stablecoinChange) / solPrice > VALUE_THRESHOLD_SOL) {
+        transactionType = 'buy';
+        totalSolAmount = Math.abs(stablecoinChange) / solPrice;
+    } else if (stablecoinChange > 0 && stablecoinChange / solPrice > VALUE_THRESHOLD_SOL) {
+        transactionType = 'sell';
+        totalSolAmount = stablecoinChange / solPrice;
+    } else if (solChange < -VALUE_THRESHOLD_SOL) {
+        transactionType = 'buy';
+        totalSolAmount = Math.abs(solChange);
+    } else if (solChange > VALUE_THRESHOLD_SOL) {
+        transactionType = 'sell';
+        totalSolAmount = solChange;
+    } else {
+        return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
+    }
+
+    const allBalanceChanges = new Map();
+    for (const pre of meta.preTokenBalances || []) {
+        const key = `${pre.mint}-${pre.accountIndex}`;
+        allBalanceChanges.set(key, {
+            mint: pre.mint,
+            accountIndex: pre.accountIndex,
+            owner: pre.owner,
+            preAmount: pre.uiTokenAmount.amount,
+            preUiAmount: pre.uiTokenAmount.uiAmount,
+            postAmount: '0',
+            postUiAmount: 0,
+            decimals: pre.uiTokenAmount.decimals
+        });
+    }
+
+    for (const post of meta.postTokenBalances || []) {
+        const key = `${post.mint}-${post.accountIndex}`;
+        if (allBalanceChanges.has(key)) {
+            const existing = allBalanceChanges.get(key);
+            existing.postAmount = post.uiTokenAmount.amount;
+            existing.postUiAmount = post.uiTokenAmount.uiAmount;
+        } else {
+            allBalanceChanges.set(key, {
+                mint: post.mint,
+                accountIndex: post.accountIndex,
+                owner: post.owner,
+                preAmount: '0',
+                preUiAmount: 0,
+                postAmount: post.uiTokenAmount.amount,
+                postUiAmount: post.uiTokenAmount.uiAmount,
+                decimals: post.uiTokenAmount.decimals
+            });
+        }
+    }
+
+    const mintChanges = new Map();
+    for (const [key, change] of allBalanceChanges) {
+        if (change.mint === WRAPPED_SOL_MINT || change.mint === USDC_MINT || change.mint === USDT_MINT) {
+            continue; 
+        }
+
+        if (change.owner !== walletAddress) {
+            continue;
+        }
+
+        const rawChange = Number(change.postAmount) - Number(change.preAmount);
+        let isValidChange = false;
+        if (transactionType === 'buy' && rawChange > 0) {
+            isValidChange = true;
+        } else if (transactionType === 'sell' && rawChange < 0) {
+            isValidChange = true;
+        }
+
+        if (isValidChange) {
+            if (mintChanges.has(change.mint)) {
+                const existing = mintChanges.get(change.mint);
+                existing.totalRawChange += Math.abs(rawChange);
+            } else {
+                mintChanges.set(change.mint, {
+                    mint: change.mint,
+                    decimals: change.decimals,
+                    totalRawChange: Math.abs(rawChange)
+                });
+            }
+        }
+    }
+
+    if (mintChanges.size === 0) {
+        return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
+    }
+
+    const mints = Array.from(mintChanges.keys());
+    const tokenInfos = await this.batchFetchTokenMetadataCached(mints);
+
+    for (const [mint, aggregatedChange] of mintChanges) {
+        const tokenInfo = tokenInfos.get(mint) || {
+            symbol: mint.slice(0, 4).toUpperCase(),
+            name: `Token ${mint.slice(0, 8)}...`,
+            decimals: aggregatedChange.decimals
+        };
+
+        tokenChanges.push({
+            mint: mint,
+            amount: aggregatedChange.totalRawChange / Math.pow(10, aggregatedChange.decimals),
+            rawChange: aggregatedChange.totalRawChange,
+            decimals: aggregatedChange.decimals,
+            symbol: tokenInfo.symbol,
+            name: tokenInfo.name
+        });
+    }
+
+    return { transactionType, totalSolAmount, tokenChanges };
+}
 
     async analyzeTokenChangesFromGrpc(meta, transactionType, walletAddress) {
         const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
