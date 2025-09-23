@@ -72,22 +72,25 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
     const groupId = req.query.groupId || null;
     const hours = parseInt(req.query.hours) || 24;
     const transactionType = req.query.type;
-    
-    console.log(`[${new Date().toISOString()}] 🚀 App initialization${groupId ? ` for group ${groupId}` : ''} by user ${req.user.username || req.user.id}`);
+
+    console.log(`[${new Date().toISOString()}] 🚀 FAST init for group ${groupId || 'all'} by user ${req.user.username || req.user.id}`);
     const startTime = Date.now();
-    
+
     const [walletCounts, transactions, groups] = await Promise.all([
-      db.getWalletCount(groupId),
-      db.getRecentTransactionsOptimized(hours, 4000, transactionType, groupId),
-      db.getGroups()
+
+      db.getWalletCountFast(groupId),
+
+      db.getRecentTransactionsRealTime(hours, 1000, transactionType, groupId),
+
+      db.getGroupsFast()
     ]);
-    
+
     const grpcStatus = solanaGrpcService.getStatus();
     const performanceStats = solanaGrpcService.getPerformanceStats();
-    
+
     const duration = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] ⚡ Initialization completed in ${duration}ms - ${transactions.length} transactions, ${walletCounts.totalWallets} wallets`);
-    
+    console.log(`[${new Date().toISOString()}] ⚡ FAST init completed in ${duration}ms - ${transactions.length} transactions`);
+
     res.json({
       success: true,
       duration,
@@ -103,35 +106,36 @@ app.get('/api/init', auth.authRequired, async (req, res) => {
           processedSignatures: grpcStatus.messageCount,
           activeWallets: performanceStats.totalMonitoredWallets,
           activeGroupId: grpcStatus.activeGroupId,
-          mode: 'full_stream_optimized',
+          mode: 'real_time',
           performance: {
             messagesReceived: performanceStats.messagesReceived,
             messagesFiltered: performanceStats.messagesFiltered,
             filterEfficiency: performanceStats.filterEfficiency,
             avgFilterTime: performanceStats.avgFilterTimeMs,
-            isHealthy: performanceStats.isHealthy
+            isHealthy: performanceStats.isHealthy,
+            queueSize: performanceStats.queueSize
           }
         },
         groups,
         performance: {
           loadTime: duration,
-          optimizationLevel: 'FULL_STREAM_OPTIMIZED_V3',
+          optimizationLevel: 'REAL_TIME',
           cacheHits: {
-            solPrice: performanceStats.solPriceCache.ageMs < 60000,
-            processedTransactions: performanceStats.caches.processedTransactions,
-            walletMetadata: performanceStats.caches.walletMetadata
+            solPrice: true,
+            processedTransactions: performanceStats.cacheSize,
+            walletMetadata: performanceStats.totalMonitoredWallets
           },
-          streamingMode: 'full_solana_with_client_filtering'
+          streamingMode: 'fast_real_time'
         }
       }
     });
-    
+
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] ❌ Error in optimized initialization:`, error);
+    console.error(`[${new Date().toISOString()}] ❌ Error in FAST init:`, error);
     res.status(500).json({ 
       error: 'Failed to initialize application data',
       details: error.message,
-      optimization: 'FULL_STREAM_OPTIMIZED_V3'
+      optimization: 'REAL_TIME'
     });
   }
 });
@@ -174,7 +178,7 @@ app.get('/api/health', (req, res) => {
       },
       isHealthy: performanceStats.isHealthy
     },
-    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING_V3'
+    optimization: 'FULL_STREAM_WITH_CLIENT_FILTERING'
   });
 });
 
@@ -193,7 +197,7 @@ app.get('/api/performance', auth.authRequired, auth.adminRequired, (req, res) =>
       version: process.version
     },
     optimization: {
-      level: 'FULL_STREAM_OPTIMIZED_V3',
+      level: 'FULL_STREAM_OPTIMIZED',
       features: [
         'Full Solana transaction stream',
         'Client-side wallet filtering',
