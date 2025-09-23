@@ -45,7 +45,7 @@ class SolanaGrpcService {
     setupCacheCleanup() {
         setInterval(() => {
             const now = Date.now();
-            
+
             if (now - this.lastProcessedCleanup >= this.PROCESSED_CLEANUP_INTERVAL) {
                 if (this.processedTransactions.size > 50000) {
                     const toDelete = Array.from(this.processedTransactions).slice(0, 25000);
@@ -54,7 +54,7 @@ class SolanaGrpcService {
                 }
                 this.lastProcessedCleanup = now;
             }
-            
+
             if (now - this.lastRecentlyProcessedCleanup >= this.RECENTLY_PROCESSED_CLEANUP_INTERVAL) {
                 if (this.recentlyProcessed.size > 5000) {
                     const toDelete = Array.from(this.recentlyProcessed).slice(0, 2500);
@@ -63,7 +63,7 @@ class SolanaGrpcService {
                 }
                 this.lastRecentlyProcessedCleanup = now;
             }
-            
+
             if (now % (6 * 60 * 60 * 1000) < 300000) { 
                 console.log(`[${new Date().toISOString()}] 📊 Cache stats: processedTransactions=${this.processedTransactions.size}, recentlyProcessed=${this.recentlyProcessed.size}`);
                 console.log(`[${new Date().toISOString()}] 📊 Last cleanup: processed=${new Date(this.lastProcessedCleanup).toISOString()}, recent=${new Date(this.lastRecentlyProcessedCleanup).toISOString()}`);
@@ -157,7 +157,7 @@ class SolanaGrpcService {
     async createSingleStream() {
         try {
             console.log(`[${new Date().toISOString()}] [INFO] Connecting to gRPC for full Solana transaction stream`);
-            
+
             const client = new Client(this.grpcEndpoint, undefined, {
                 'grpc.keepalive_time_ms': 30000,
                 'grpc.keepalive_timeout_ms': 5000,
@@ -206,7 +206,7 @@ class SolanaGrpcService {
             };
 
             console.log(`[${new Date().toISOString()}] [INFO] Sending subscription for full Solana transaction stream`);
-            
+
             await new Promise((resolve, reject) => stream.write(request, err => {
                 if (err) {
                     console.error(`[${new Date().toISOString()}] [ERROR] Subscription request failed: ${err.message}`);
@@ -326,102 +326,127 @@ class SolanaGrpcService {
         console.log(`[${new Date().toISOString()}] [INFO] Batch processed: ${successful}/${batch.size} successful`);
     }
 
-    async processTransaction(transactionData) {
-        try {
-            let transaction = null, meta = null;
+async processTransaction(transactionData) {
+    try {
+        let transaction = null, meta = null;
 
-            if (transactionData.transaction?.transaction) {
-                transaction = transactionData.transaction.transaction;
-                meta = transactionData.transaction.meta;
-            } else if (transactionData.transaction && transactionData.meta) {
-                transaction = transactionData.transaction;
-                meta = transactionData.meta;
-            } else {
-                transaction = transactionData.transaction || transactionData;
-                meta = transactionData.meta || transactionData;
-            }
+        if (transactionData.transaction?.transaction) {
+            transaction = transactionData.transaction.transaction;
+            meta = transactionData.transaction.meta;
+        } else if (transactionData.transaction && transactionData.meta) {
+            transaction = transactionData.transaction;
+            meta = transactionData.meta;
+        } else {
+            transaction = transactionData.transaction || transactionData;
+            meta = transactionData.meta || transactionData;
+        }
 
-            if (!transaction || !meta || meta.err) {
-                return null;
-            }
-
-            const signature = this.extractSignature(transactionData) || transactionData.signature;
-            if (!signature) return null;
-
-            const processedKey = `${signature}`;
-            if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
-                return null;
-            }
-
-            this.processedTransactions.add(signature);
-            this.recentlyProcessed.add(processedKey);
-
-            const existingTx = await this.db.pool.query(
-                'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
-                [signature]
-            );
-            if (existingTx.rows.length > 0) {
-                return null;
-            }
-
-            let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
-            if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
-            if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
-
-            const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
-            const involvedWalletAddress = Array.from(this.allMonitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
-            if (!involvedWalletAddress) return null;
-
-            const walletCacheKey = `wallet:${involvedWalletAddress}`;
-            let wallet = null;
-
-            try {
-                const cachedWallet = await redis.get(walletCacheKey);
-                if (cachedWallet) {
-                    wallet = JSON.parse(cachedWallet);
-                } else {
-                    wallet = await this.db.getWalletByAddress(involvedWalletAddress);
-                    if (wallet) {
-                        await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
-                    }
-                }
-            } catch (error) {
-                wallet = await this.db.getWalletByAddress(involvedWalletAddress);
-            }
-
-            if (!wallet) return null;
-
-            if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
-                return null;
-            }
-
-            const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
-
-            const solPrice = await this.fetchSolPrice();
-            const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
-                meta,
-                walletAddress: wallet.address,
-                solPrice
-            });
-
-            if (!transactionType || totalSolAmount <= 0.01 || tokenChanges.length === 0) {
-                return null;
-            }
-
-            return await this.processTransactionFromGrpcData({
-                signature,
-                transaction,
-                meta,
-                blockTime,
-                wallet,
-                accountKeys: stringAccountKeys
-            });
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction: ${error.message}`);
+        if (!transaction || !meta || meta.err) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: no transaction, meta, or has error`);
             return null;
         }
+
+        const signature = this.extractSignature(transactionData) || transactionData.signature;
+        if (!signature) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: no signature`);
+            return null;
+        }
+
+        const processedKey = `${signature}`;
+        if (this.processedTransactions.has(signature) || this.recentlyProcessed.has(processedKey)) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: already processed`);
+            return null;
+        }
+
+        this.processedTransactions.add(signature);
+        this.recentlyProcessed.add(processedKey);
+
+        const existingTx = await this.db.pool.query(
+            'SELECT id FROM transactions WHERE signature = $1 LIMIT 1',
+            [signature]
+        );
+        if (existingTx.rows.length > 0) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: exists in DB`);
+            return null;
+        }
+
+        let accountKeys = transaction.message?.accountKeys || transaction.accountKeys || [];
+        if (meta.loadedWritableAddresses) accountKeys = accountKeys.concat(meta.loadedWritableAddresses);
+        if (meta.loadedReadonlyAddresses) accountKeys = accountKeys.concat(meta.loadedReadonlyAddresses);
+
+        const stringAccountKeys = this.convertAccountKeysToStrings(accountKeys);
+        const involvedWalletAddress = Array.from(this.allMonitoredWallets).find(wallet => stringAccountKeys.includes(wallet));
+        if (!involvedWalletAddress) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: no monitored wallet involved`);
+            return null;
+        }
+
+        const walletCacheKey = `wallet:${involvedWalletAddress}`;
+        let wallet = null;
+
+        try {
+            const cachedWallet = await redis.get(walletCacheKey);
+            if (cachedWallet) {
+                wallet = JSON.parse(cachedWallet);
+            } else {
+                wallet = await this.db.getWalletByAddress(involvedWalletAddress);
+                if (wallet) {
+                    await redis.setex(walletCacheKey, 300, JSON.stringify(wallet));
+                }
+            }
+        } catch (error) {
+            wallet = await this.db.getWalletByAddress(involvedWalletAddress);
+        }
+
+        if (!wallet) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: wallet not found`);
+            return null;
+        }
+
+        if (this.activeGroupId && wallet.group_id !== this.activeGroupId) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: wallet not in active group ${this.activeGroupId}`);
+            return null;
+        }
+
+        const walletIndex = stringAccountKeys.indexOf(wallet.address);
+        if (walletIndex === -1) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: wallet index not found`);
+            return null;
+        }
+
+        const preBalance = meta.preBalances[walletIndex] || 0;
+        const postBalance = meta.postBalances[walletIndex] || 0;
+        const solChange = (postBalance - preBalance) / 1e9;
+
+        const blockTime = Number(transactionData.blockTime) || Math.floor(Date.now() / 1000);
+        const solPrice = await this.fetchSolPrice();
+
+        const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+            meta,
+            walletAddress: wallet.address,
+            solPrice,
+            solChange
+        });
+
+        if (!transactionType || Math.abs(totalSolAmount) <= 0.01) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: type=${transactionType}, solAmount=${totalSolAmount}, tokenChanges=${tokenChanges.length}`);
+            return null;
+        }
+
+        return await this.processTransactionFromGrpcData({
+            signature,
+            transaction,
+            meta,
+            blockTime,
+            wallet,
+            accountKeys: stringAccountKeys
+        });
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] [ERROR] Error processing transaction ${signature || 'unknown'}: ${error.message}`);
+        return null;
     }
+}
 
     convertAccountKeysToStrings(accountKeys) {
         const stringAccountKeys = [];
@@ -455,74 +480,78 @@ class SolanaGrpcService {
         return stringAccountKeys;
     }
 
-    async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
-        try {
-            const walletIndex = accountKeys.indexOf(wallet.address);
-            if (walletIndex === -1) return null;
-
-            const preBalance = meta.preBalances[walletIndex] || 0;
-            const postBalance = meta.postBalances[walletIndex] || 0;
-            const solChange = (postBalance - preBalance) / 1e9;
-
-            const solPrice = await this.fetchSolPrice();
-
-            const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
-                meta,
-                solChange,
-                walletAddress: wallet.address,
-                solPrice
-            });
-
-            if (!transactionType || tokenChanges.length === 0) {
-                return null;
-            }
-
-            const savedTransaction = await this.saveTransactionToDb({
-                wallet,
-                signature,
-                blockTime,
-                transactionType,
-                totalSolAmount,
-                tokenChanges,
-                solPrice
-            });
-
-            if (savedTransaction) {
-                const transactionMessage = {
-                    signature,
-                    walletAddress: wallet.address,
-                    walletName: wallet.name,
-                    groupId: wallet.group_id,
-                    groupName: wallet.group_name,
-                    transactionType,
-                    solAmount: totalSolAmount,
-                    tokens: tokenChanges.map(tc => ({
-                        mint: tc.mint,
-                        amount: tc.amount,
-                        symbol: tc.symbol,
-                        name: tc.name
-                    })),
-                    timestamp: new Date(blockTime * 1000).toISOString()
-                };
-
-                const pipeline = redis.pipeline();
-                pipeline.publish('transactions', JSON.stringify(transactionMessage));
-                if (wallet.group_id) {
-                    pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
-                }
-                await pipeline.exec();
-
-                console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType})`);
-                return savedTransaction;
-            }
-
-            return null;
-
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction: ${error.message}`);
+async processTransactionFromGrpcData({ signature, transaction, meta, blockTime, wallet, accountKeys }) {
+    try {
+        const walletIndex = accountKeys.indexOf(wallet.address);
+        if (walletIndex === -1) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped: wallet index not found in processTransactionFromGrpcData`);
             return null;
         }
+
+        const preBalance = meta.preBalances[walletIndex] || 0;
+        const postBalance = meta.postBalances[walletIndex] || 0;
+        const solChange = (postBalance - preBalance) / 1e9;
+
+        const solPrice = await this.fetchSolPrice();
+
+        const { transactionType, totalSolAmount, tokenChanges } = await this.analyzeTransactionFromGrpc({
+            meta,
+            solChange,
+            walletAddress: wallet.address,
+            solPrice
+        });
+
+        if (!transactionType || Math.abs(totalSolAmount) <= 0.01) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] Transaction ${signature} skipped in processTransactionFromGrpcData: type=${transactionType}, solAmount=${totalSolAmount}, tokenChanges=${tokenChanges.length}`);
+            return null;
+        }
+
+        const savedTransaction = await this.saveTransactionToDb({
+            wallet,
+            signature,
+            blockTime,
+            transactionType,
+            totalSolAmount,
+            tokenChanges,
+            solPrice
+        });
+
+        if (savedTransaction) {
+            const transactionMessage = {
+                signature,
+                walletAddress: wallet.address,
+                walletName: wallet.name,
+                groupId: wallet.group_id,
+                groupName: wallet.group_name,
+                transactionType,
+                solAmount: totalSolAmount,
+                tokens: tokenChanges.map(tc => ({
+                    mint: tc.mint,
+                    amount: tc.amount,
+                    symbol: tc.symbol,
+                    name: tc.name
+                })),
+                timestamp: new Date(blockTime * 1000).toISOString()
+            };
+
+            const pipeline = redis.pipeline();
+            pipeline.publish('transactions', JSON.stringify(transactionMessage));
+            if (wallet.group_id) {
+                pipeline.publish(`transactions:group:${wallet.group_id}`, JSON.stringify(transactionMessage));
+            }
+            await pipeline.exec();
+
+            console.log(`[${new Date().toISOString()}] ✅ Processed transaction ${signature} (${transactionType}, SOL: ${totalSolAmount}, tokens: ${tokenChanges.length})`);
+            return savedTransaction;
+        }
+
+        return null;
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] ❌ Error processing gRPC transaction ${signature}: ${error.message}`);
+        return null;
     }
+}
 
     async saveTransactionToDb({ wallet, signature, blockTime, transactionType, totalSolAmount, tokenChanges, solPrice }) {
         try {
@@ -619,53 +648,64 @@ class SolanaGrpcService {
         }
     }
 
-    async analyzeTransactionFromGrpc({ meta, solChange, walletAddress, solPrice }) {
-        const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+async analyzeTransactionFromGrpc({ meta, walletAddress, solPrice, solChange }) {
+    const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
+    const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
-        let transactionType = null;
-        let totalSolAmount = 0;
+    let transactionType = null;
+    let totalSolAmount = 0;
+    let tokenChanges = [];
 
-        const usdcPreBalance = (meta.preTokenBalances || []).find(b =>
-            b.mint === USDC_MINT && b.owner === walletAddress
-        );
-        const usdcPostBalance = (meta.postTokenBalances || []).find(b =>
-            b.mint === USDC_MINT && b.owner === walletAddress
-        );
+    const hasNonUsdcTokenChanges = (meta.preTokenBalances || []).some(b => b.mint !== WRAPPED_SOL_MINT && b.mint !== USDC_MINT) ||
+                                   (meta.postTokenBalances || []).some(b => b.mint !== WRAPPED_SOL_MINT && b.mint !== USDC_MINT);
 
-        let usdcChange = 0;
-        if (usdcPreBalance && usdcPostBalance) {
-            usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) -
-                Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
-        } else if (usdcPostBalance) {
-            usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
-        } else if (usdcPreBalance) {
-            usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
-        }
+    if (hasNonUsdcTokenChanges) {
+        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction has non-USDC/non-Wrapped SOL token changes, skipping`);
+        return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
+    }
 
-        if (usdcChange < 0) {
-            transactionType = 'buy';
-            totalSolAmount = Math.abs(usdcChange) / solPrice;
-        } else if (usdcChange > 0) {
-            transactionType = 'sell';
-            totalSolAmount = usdcChange / solPrice;
-        } else if (solChange < -this.BUY_THRESHOLD) {
-            transactionType = 'buy';
-            totalSolAmount = Math.abs(solChange);
-        } else if (solChange > this.SELL_THRESHOLD) {
-            transactionType = 'sell';
-            totalSolAmount = solChange;
-        } else {
+    const usdcPreBalance = (meta.preTokenBalances || []).find(b => b.mint === USDC_MINT && b.owner === walletAddress);
+    const usdcPostBalance = (meta.postTokenBalances || []).find(b => b.mint === USDC_MINT && b.owner === walletAddress);
+
+    let usdcChange = 0;
+    if (usdcPreBalance && usdcPostBalance) {
+        usdcChange = (Number(usdcPostBalance.uiTokenAmount.amount) - Number(usdcPreBalance.uiTokenAmount.amount)) / 1e6;
+    } else if (usdcPostBalance) {
+        usdcChange = Number(usdcPostBalance.uiTokenAmount.uiAmount || 0);
+    } else if (usdcPreBalance) {
+        usdcChange = -Number(usdcPreBalance.uiTokenAmount.uiAmount || 0);
+    }
+
+    if (usdcChange !== 0) {
+
+        const usdAmount = Math.abs(usdcChange);
+        totalSolAmount = usdAmount / solPrice;
+        if (totalSolAmount <= 0.01) {
+            console.log(`[${new Date().toISOString()}] [DEBUG] USDC transaction skipped: solAmount=${totalSolAmount} <= 0.01`);
             return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
         }
+        transactionType = usdcChange < 0 ? 'buy' : 'sell';
+        tokenChanges = [{
+            mint: USDC_MINT,
+            amount: Math.abs(usdcChange),
+            rawChange: Math.abs(usdcChange * 1e6),
+            decimals: 6,
+            symbol: 'USDC',
+            name: 'USD Coin'
+        }];
+    } else if (Math.abs(solChange) > 0.01) {
 
-        const tokenChanges = await this.analyzeTokenChangesFromGrpc(
-            meta,
-            transactionType,
-            walletAddress
-        );
-
-        return { transactionType, totalSolAmount, tokenChanges };
+        transactionType = solChange < 0 ? 'buy' : 'sell';
+        totalSolAmount = Math.abs(solChange);
+        tokenChanges = []; 
+    } else {
+        console.log(`[${new Date().toISOString()}] [DEBUG] Transaction skipped: solChange=${solChange}, usdcChange=${usdcChange}`);
+        return { transactionType: null, totalSolAmount: 0, tokenChanges: [] };
     }
+
+    console.log(`[${new Date().toISOString()}] [DEBUG] Transaction analyzed: type=${transactionType}, solAmount=${totalSolAmount}, tokenChanges=${tokenChanges.length}, usdcChange=${usdcChange}`);
+    return { transactionType, totalSolAmount, tokenChanges };
+}
 
     async analyzeTokenChangesFromGrpc(meta, transactionType, walletAddress) {
         const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -1118,29 +1158,29 @@ class SolanaGrpcService {
             processedTransactions: this.processedTransactions.size,
             recentlyProcessed: this.recentlyProcessed.size
         };
-        
+
         if (this.processedTransactions.size > 1000) {
             const toDeleteProcessed = Array.from(this.processedTransactions).slice(0, Math.floor(this.processedTransactions.size / 2));
             toDeleteProcessed.forEach(sig => this.processedTransactions.delete(sig));
         } else {
             this.processedTransactions.clear();
         }
-        
+
         if (this.recentlyProcessed.size > 1000) {
             const toDeleteRecent = Array.from(this.recentlyProcessed).slice(0, Math.floor(this.recentlyProcessed.size / 2));
             toDeleteRecent.forEach(key => this.recentlyProcessed.delete(key));
         } else {
             this.recentlyProcessed.clear();
         }
-        
+
         this.lastProcessedCleanup = Date.now();
         this.lastRecentlyProcessedCleanup = Date.now();
-        
+
         const after = {
             processedTransactions: this.processedTransactions.size,
             recentlyProcessed: this.recentlyProcessed.size
         };
-        
+
         console.log(`[${new Date().toISOString()}] 🧹 Force cleanup completed:`, { before, after });
         return { before, after };
     }
