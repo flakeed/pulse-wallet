@@ -20,9 +20,9 @@ class SolanaGrpcService {
         this.filteredCount = 0;
         this.activeGroupId = null;
 
-        this.monitoredWallets = new Set();
-        this.walletToGroup = new Map();
-        this.walletMetadata = new Map();
+        this.monitoredWallets = new Set(); 
+        this.walletToGroup = new Map(); 
+        this.walletMetadata = new Map(); 
 
         this.processedTransactions = new Set();
         this.recentlyProcessed = new Set();
@@ -34,8 +34,8 @@ class SolanaGrpcService {
 
         this.transactionBatch = new Map();
         this.batchTimer = null;
-        this.batchSize = 500;
-        this.batchTimeout = 10;
+        this.batchSize = 500; 
+        this.batchTimeout = 10; 
 
         this.BUY_THRESHOLD = parseFloat(process.env.SOL_BUY_THRESHOLD) || 0.01;
         this.SELL_THRESHOLD = parseFloat(process.env.SOL_SELL_THRESHOLD) || 0.001;
@@ -105,7 +105,7 @@ class SolanaGrpcService {
                 }
                 this.lastRecentlyProcessedCleanup = now;
             }
-        }, 300000);
+        }, 300000); 
     }
 
     async loadMonitoredWallets(groupId = null) {
@@ -205,12 +205,12 @@ class SolanaGrpcService {
                 accounts: {},
                 slots: {},
                 transactions: {
-                    "": {
-                        vote: false,
-                        failed: false,
-                        accountInclude: Array.from(this.monitoredWallets),
-                        accountExclude: [],
-                        accountRequired: []
+                    [""]: {  
+                        vote: false,           
+                        failed: false,         
+                        accountInclude: [],    
+                        accountExclude: [],    
+                        accountRequired: []    
                     }
                 },
                 transactionsStatus: {},
@@ -271,7 +271,7 @@ class SolanaGrpcService {
 
             const filterStart = process.hrtime.bigint();
             const isRelevant = this.quickFilterTransaction(data.transaction);
-            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000;
+            const filterTime = Number(process.hrtime.bigint() - filterStart) / 1000000; 
 
             if (!isRelevant) {
                 this.stats.totalFiltered++;
@@ -616,11 +616,11 @@ class SolanaGrpcService {
 
         console.log(`[${new Date().toISOString()}] ✅ Wallet monitoring updated: ${this.monitoredWallets.size.toLocaleString()} total wallets`);
 
-        return {
-            successful,
-            failed: 0,
-            errors: [],
-            totalMonitored: this.monitoredWallets.size
+        return { 
+            successful, 
+            failed: 0, 
+            errors: [], 
+            totalMonitored: this.monitoredWallets.size 
         };
     }
 
@@ -645,7 +645,7 @@ class SolanaGrpcService {
             isStarted: this.isStarted,
             activeGroupId: this.activeGroupId,
             totalSubscriptions: this.monitoredWallets.size,
-            numStreams: 1,
+            numStreams: 1, 
             messageCount: this.messageCount,
             filteredCount: this.filteredCount,
             reconnectAttempts: this.reconnectAttempts,
@@ -748,7 +748,7 @@ class SolanaGrpcService {
                     timestamp: new Date(blockTime * 1000).toISOString()
                 };
 
-                return transactionMessage;
+                return transactionMessage; 
             }
 
             return null;
